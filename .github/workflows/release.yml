@@ -22,7 +22,7 @@ jobs:
             platform: windows-x64
             installer: exe
             tasks: packageInstaller packagePortable
-          - os: macos-13
+          - os: macos-14
             platform: macos-x64
             installer: tar.gz
             tasks: packagePortable
