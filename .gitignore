@@ -1,0 +1,11 @@
+/data/
+/build/
+/.gradle/
+/.idea/
+/web/node_modules/
+/web/dist/
+/out/
+__pycache__/
+*.pyc
+
+/release/

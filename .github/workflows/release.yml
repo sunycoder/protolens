@@ -1,0 +1,71 @@
+name: 发布 ProtoLens
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: protolens-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+            installer: exe
+          - os: macos-latest
+            platform: macos-arm64
+            installer: dmg
+          - os: ubuntu-latest
+            platform: linux-x64
+            installer: deb
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: 构建安装包和便携包
+        run: gradle packageInstaller packagePortable
+      - name: 上传发布产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: protolens-${{ matrix.platform }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            release/${{ matrix.platform }}/ProtoLens-latest.${{ matrix.installer }}
+            release/ProtoLens-latest.exe
+            build/distributions/ProtoLens-*.zip
+            build/distributions/ProtoLens-*.tar.gz
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: protolens-*
+          path: release
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release/**/*

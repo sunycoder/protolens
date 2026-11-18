@@ -1,0 +1,22 @@
+{
+  "serverPort": 18766,
+  "frontendPort": 5174,
+  "collectorPort": 18888,
+  "frontendMode": "auto",
+  "openBrowser": true,
+  "dataDirectory": "data",
+  "competitorPath": "D:/work/20261008/slgProject",
+  "protocolFile": "",
+  "protocolAutoLoad": true,
+  "autoStartCollector": true,
+  "maxMessages": 10000,
+  "maxCacheMiB": 64,
+  "captureHosts": [
+    "bjxuejing.cn",
+    "tuyoo.com"
+  ],
+  "capturePathPrefixes": [
+    "/websocket"
+  ],
+  "autoSystemProxy": true
+}

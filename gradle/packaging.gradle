@@ -1,0 +1,429 @@
+// 安装包与 debugger 使用相同的 jpackage 生命周期；此脚本只拥有本模块的发布目录。
+if (providers.gradleProperty('analyzerBuildDir').isPresent()) {
+    layout.buildDirectory = file(providers.gradleProperty('analyzerBuildDir').get())
+}
+def versionProperties = new Properties()
+file('src/main/resources/analyzer-version.properties').withInputStream { versionProperties.load(it) }
+def analyzerVersion = providers.gradleProperty('analyzerVersion').getOrElse(versionProperties.getProperty('version'))
+if (!(analyzerVersion ==~ /\d{1,3}\.\d{1,3}\.\d{1,5}/)) {
+    throw new GradleException('analyzerVersion 必须为主版本.次版本.修订版本，例如 0.1.0')
+}
+def versionParts = analyzerVersion.split('\\.').collect { it.toInteger() }
+if (versionParts[0] > 255 || versionParts[1] > 255 || versionParts[2] > 65535) {
+    throw new GradleException('Windows 主/次版本不能超过255，修订版本不能超过65535')
+}
+version = analyzerVersion
+// 产品独立且永久固定，不能沿用 debugger 的 UpgradeCode，否则两个应用会互相卸载。
+def analyzerUpgradeUuid = '79e567ca-23e9-4b20-a323-796305209e9b'
+def generatedResources = layout.buildDirectory.dir('generated-resources')
+sourceSets.main.resources.srcDir(generatedResources)
+tasks.register('updateDesktopIcons', Exec) {
+    group = 'build'
+    description = '生成与网页蓝色双向箭头一致的桌面、托盘及原生安装图标。'
+    executable new File(System.getProperty('java.home'), "bin/java${analyzerPlatform.executableSuffix}")
+    args '--source', '21', file('tools/GenerateDesktopIcons.java').absolutePath,
+            generatedResources.get().dir('desktop').asFile.absolutePath
+    inputs.file('tools/GenerateDesktopIcons.java')
+    outputs.dir(generatedResources.map { it.dir('desktop') })
+}
+tasks.named('processResources') {
+    dependsOn 'updateDesktopIcons'
+    inputs.property('analyzerVersion', analyzerVersion)
+    filesMatching('analyzer-version.properties') {
+        filter { line -> line.startsWith('version=') ? "version=${analyzerVersion}" : line }
+    }
+}
+tasks.named('jar') {
+    archiveFileName = 'protolens.jar'
+    manifest {
+        attributes 'Main-Class': application.mainClass.get(),
+                'Class-Path': configurations.runtimeClasspath.files.collect { "lib/${it.name}" }.join(' ')
+    }
+}
+// 只打包明确提供的本机可执行文件；绝不复制 data 整个目录，避免携带抓包、证书私钥及凭证。
+def nativeNode = providers.gradleProperty('analyzerNodeExecutable').map { file(it) }.orElse(provider {
+    def name = "node${analyzerPlatform.executableSuffix}"
+    def directories = (System.getenv('PATH') ?: '').split(java.util.regex.Pattern.quote(File.pathSeparator))
+    def found = directories.collect { new File(it.replace('"', ''), name) }.find { it.isFile() }
+    if (found == null) { throw new GradleException('找不到 Node，请设置 -PanalyzerNodeExecutable=<本机node路径>') }
+    found
+})
+def nativeCollector = providers.gradleProperty('analyzerMitmdumpExecutable').map { file(it) }
+        .orElse(provider { file("data/mitmproxy/mitmdump${analyzerPlatform.executableSuffix}") })
+// 源码或打包缺少默认采集器时自动准备，复用运行时的固定版本、摘要及解压实现。
+tasks.register('prepareCollector', JavaExec) {
+    group = 'distribution'
+    description = '自动准备固定版本采集器，无需手动下载或复制程序。'
+    dependsOn 'classes'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.lashouwan.protolens.desktop.CollectorInstaller'
+    args nativeCollector.get().absolutePath
+    onlyIf { !providers.gradleProperty('analyzerMitmdumpExecutable').isPresent() }
+}
+
+tasks.register('stageNativeTools') {
+    dependsOn 'prepareCollector'
+    inputs.files(nativeNode, nativeCollector)
+    inputs.property('nativePlatform', analyzerPlatform.id)
+    inputs.files(provider { ['analyzerNodeLicense', 'analyzerMitmproxyLicense'].findAll { project.hasProperty(it) }.collect { file(project.property(it)) } })
+    outputs.dir(layout.buildDirectory.dir('native-tools'))
+    doLast {
+        def node = nativeNode.get()
+        def collector = nativeCollector.get()
+        if (!node.isFile() || !collector.isFile()) {
+            throw new GradleException('缺少 Node 或 mitmdump；请提供 analyzerNodeExecutable/analyzerMitmdumpExecutable 原生程序路径')
+        }
+        def output = new ByteArrayOutputStream()
+        project.exec {
+            commandLine node.absolutePath, '-p', "[process.platform,process.arch,process.version].join(' ')"
+            standardOutput output
+        }
+        def identity = output.toString('UTF-8').trim().split(' ')
+        def expectedOs = [windows: 'win32', macos: 'darwin', linux: 'linux'][analyzerPlatform.os]
+        if (identity[0] != expectedOs || identity[1] != analyzerPlatform.arch) {
+            throw new GradleException("Node 与构建平台不匹配：${output}")
+        }
+        // 拒绝 pip 生成的 Python 入口脚本；最终使用者不应再安装 Python 或 mitmproxy 依赖。
+        def prefix = collector.withInputStream { stream ->
+            stream.readNBytes(4).collect { String.format('%02x', it & 0xff) }.join('')
+        }
+        def nativeBinary = analyzerPlatform.os == 'windows' ? prefix.startsWith('4d5a')
+                : analyzerPlatform.os == 'linux' ? prefix == '7f454c46'
+                : ['cffaedfe', 'feedfacf', 'cefaedfe', 'feedface', 'cafebabe', 'bebafeca', 'cafebabf', 'bfbafeca'].contains(prefix)
+        if (!nativeBinary) {
+            throw new GradleException('mitmdump 必须是对应平台的官方独立可执行程序，不能使用依赖外部 Python 的 pip 入口脚本')
+        }
+        def collectorVersion = new ByteArrayOutputStream()
+        project.exec { commandLine collector.absolutePath, '--version'; standardOutput collectorVersion }
+        def versionMatch = collectorVersion.toString('UTF-8') =~ /Mitmproxy:\s*([0-9.]+)/
+        if (!versionMatch.find()) { throw new GradleException('无法识别 mitmdump 版本') }
+        def mitmVersion = versionMatch.group(1)
+        def target = layout.buildDirectory.dir('native-tools').get().asFile
+        copy { from node; into target; rename { "node${analyzerPlatform.executableSuffix}" } }
+        copy { from collector; into target; rename { "mitmdump${analyzerPlatform.executableSuffix}" } }
+        if (analyzerPlatform.os != 'windows') {
+            new File(target, 'node').setExecutable(true, false)
+            new File(target, 'mitmdump').setExecutable(true, false)
+        }
+        // 许可证按真实工具版本缓存；显式文件用于离线构建，不在网络抖动时替换为别的版本。
+        def licenses = new File(target, 'licenses')
+        licenses.mkdirs()
+        [['node', identity[2], 'analyzerNodeLicense', "https://raw.githubusercontent.com/nodejs/node/${identity[2]}/LICENSE"],
+         ['mitmproxy', mitmVersion, 'analyzerMitmproxyLicense', "https://raw.githubusercontent.com/mitmproxy/mitmproxy/v${mitmVersion}/LICENSE"]].each { entry ->
+            def name = entry[0]
+            def runtimeVersion = entry[1]
+            def license = new File(licenses, "${name}-LICENSE.txt")
+            def cached = layout.buildDirectory.file("native-license-cache/${name}-${runtimeVersion}.txt").get().asFile
+            def explicit = providers.gradleProperty(entry[2]).orNull
+            if (explicit != null) {
+                def supplied = file(explicit)
+                if (!supplied.isFile() || supplied.length() < 100) {
+                    throw new GradleException("许可证文件不存在或为空：${supplied}")
+                }
+                cached.parentFile.mkdirs()
+                java.nio.file.Files.copy(supplied.toPath(), cached.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            }
+            if (!cached.isFile()) {
+                try {
+                    def text = new URI(entry[3]).toURL().getText(connectTimeout: 15000, readTimeout: 30000, 'UTF-8')
+                    if (text.length() < 100 || !text.contains('Copyright')) { throw new IOException('许可证内容不完整') }
+                    cached.parentFile.mkdirs()
+                    cached.setText(text, 'UTF-8')
+                } catch (Exception failure) {
+                    throw new GradleException("下载 ${name} ${runtimeVersion} 官方许可证失败。可用 -P${entry[2]}=<该版本LICENSE文件> 离线构建。", failure)
+                }
+            }
+            java.nio.file.Files.copy(cached.toPath(), license.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        }
+        new File(target, 'versions.txt').setText("platform=${analyzerPlatform.id}\nnode=${identity[2]}\nmitmproxy=${mitmVersion}\n", 'UTF-8')
+    }
+}
+tasks.register('stageDependencyLicenses') {
+    dependsOn 'webInstall'
+    inputs.files(configurations.runtimeClasspath, 'web/node_modules/acorn/LICENSE')
+    outputs.dir(layout.buildDirectory.dir('dependency-licenses'))
+    doLast {
+        def target = layout.buildDirectory.dir('dependency-licenses').get().asFile
+        configurations.runtimeClasspath.files.each { dependency ->
+            copy {
+                from zipTree(dependency)
+                include 'META-INF/LICENSE*', 'META-INF/NOTICE*', 'LICENSE*', 'NOTICE*'
+                into new File(target, "java/${dependency.name}")
+            }
+        }
+        def lock = new groovy.json.JsonSlurper().parse(file('web/package-lock.json'))
+        lock.packages.keySet().findAll { it.startsWith('node_modules/') }.each { packagePath ->
+            copy {
+                from file("web/${packagePath}")
+                include 'LICENSE*', 'LICENCE*', 'NOTICE*', 'COPYING*'
+                into new File(target, "npm/${packagePath.replace('/', '__')}")
+            }
+        }
+    }
+}
+tasks.register('stageDistribution', Sync) {
+    dependsOn 'jar', 'webBuild', 'stageDependencyLicenses', 'stageNativeTools'
+    into layout.buildDirectory.dir('distribution-input')
+    from(tasks.named('jar'))
+    from(configurations.runtimeClasspath) { into 'lib' }
+    from('web/dist') { into 'web' }
+    from('web/package.json') { into 'web' }
+    from('web/node_modules/acorn') { into 'web/node_modules/acorn' }
+    from('tools') { include 'extract-catalog.mjs', 'mitmproxy_collector.py', 'WindowsSystemProxy.ps1', 'WindowsSystemProxy.cs'; into 'tools' }
+    from('config') { include 'analyzer.json'; into 'config' }
+    from('README.md')
+    from(layout.buildDirectory.dir('native-tools')) { into 'runtime-tools' }
+    from(layout.buildDirectory.dir('dependency-licenses')) { into 'licenses' }
+}
+tasks.register('verifyDistribution') {
+    dependsOn 'stageDistribution'
+    doLast {
+        def target = layout.buildDirectory.dir('distribution-input').get().asFile
+        ['protolens.jar', 'web/index.html', 'web/package.json', 'web/node_modules/acorn/dist/acorn.js',
+         'tools/extract-catalog.mjs', 'tools/mitmproxy_collector.py', 'config/analyzer.json',
+         "runtime-tools/node${analyzerPlatform.executableSuffix}",
+         "runtime-tools/mitmdump${analyzerPlatform.executableSuffix}",
+         'runtime-tools/licenses/node-LICENSE.txt', 'runtime-tools/licenses/mitmproxy-LICENSE.txt'].each { name ->
+            if (!new File(target, name).isFile()) { throw new GradleException("分发缺少文件：${name}") }
+        }
+        def forbidden = fileTree(target) {
+            include '**/*.pem', '**/*.p12', '**/*.key', '**/*.saz', '**/catalog.json', '**/settings.json', '**/mcp-token*', '**/instance.json'
+        }.files
+        if (!forbidden.isEmpty() || new File(target, 'data').exists()) {
+            throw new GradleException('分发意外包含本机数据，拒绝打包')
+        }
+        if (configurations.runtimeClasspath.files.any { it.name ==~ /(?i).*(robot|support|mongodb|morphia|dubbo|zookeeper|jedis).*\.jar/ }) {
+            throw new GradleException('独立工作台混入游戏基础设施依赖')
+        }
+    }
+}
+
+// 可指定独立输出目录，以便构建新版本时不覆盖仍在运行的便携版。
+def analyzerReleaseRoot = providers.gradleProperty('analyzerReleaseDir')
+        .map { file(it) }.getOrElse(layout.buildDirectory.get().asFile)
+def analyzerImageRoot = new File(analyzerReleaseRoot, 'app-image')
+def analyzerStagingRoot = new File(analyzerReleaseRoot, '.app-image-staging')
+def analyzerImage = new File(analyzerImageRoot, analyzerPlatform.imageName)
+def jpackageExecutable = new File(System.getProperty('java.home'), "bin/jpackage${analyzerPlatform.executableSuffix}")
+def installerType = providers.gradleProperty('analyzerInstallerType').getOrElse(analyzerPlatform.installers.first())
+def installerStaging = new File(analyzerReleaseRoot, '.installer-staging')
+
+// 发布到单个平台目录，其他平台的最新包不受影响；Windows保留原取包地址兼容已有分发流程。
+def publishInstaller = { File source, File directory ->
+    def releaseRoot = file('release').canonicalFile.toPath()
+    def destination = directory.canonicalFile.toPath()
+    if (releaseRoot.parent != projectDir.canonicalFile.toPath() || releaseRoot.fileName.toString() != 'release'
+            || !destination.startsWith(releaseRoot)
+            || java.nio.file.Files.isSymbolicLink(directory.toPath())) {
+        throw new GradleException('最新安装包目录超出protolens/release或为符号链接')
+    }
+    java.nio.file.Files.createDirectories(destination)
+    def temporary = java.nio.file.Files.createTempFile(destination, '.analyzer-installer-', '.tmp')
+    def target = destination.resolve("ProtoLens-latest.${installerType}")
+    try {
+        java.nio.file.Files.copy(source.toPath(), temporary, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        if (java.nio.file.Files.mismatch(source.toPath(), temporary) != -1) {
+            throw new GradleException('最新安装包复制校验失败，保留原安装包')
+        }
+        java.nio.file.Files.move(temporary, target,
+                java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        // 同平台只保留一个最新安装格式；先成功发布，再清理本任务管理的其他格式。
+        ['exe', 'dmg', 'pkg', 'deb', 'rpm'].findAll { it != installerType }.each { extension ->
+            java.nio.file.Files.deleteIfExists(destination.resolve("ProtoLens-latest.${extension}"))
+        }
+    } finally {
+        java.nio.file.Files.deleteIfExists(temporary)
+    }
+    logger.lifecycle('最新安装包已更新（版本{}）：{}', analyzerVersion, target)
+}
+
+tasks.register('verifyPackagingPlatform') {
+    group = 'verification'
+    doLast {
+        if (!analyzerPlatform.installers.contains(installerType)) {
+            throw new GradleException("${analyzerPlatform.id}不支持安装格式${installerType}，可用：${analyzerPlatform.installers}")
+        }
+        if (JavaVersion.current() != JavaVersion.VERSION_21 || !jpackageExecutable.isFile()) {
+            throw new GradleException('打包必须使用包含jpackage的JDK 21；检查JAVA_HOME及Gradle JVM')
+        }
+        logger.lifecycle('原生构建平台：{}；安装格式：{}；不交叉生成其他系统安装包', analyzerPlatform.id, installerType)
+    }
+}
+
+tasks.register('packageAppImage', Exec) {
+    dependsOn 'verifyPackagingPlatform'
+    dependsOn 'checkPackagingPlatforms'
+    dependsOn 'updateDesktopIcons'
+    dependsOn 'verifyDistribution'
+    inputs.dir(layout.buildDirectory.dir('distribution-input'))
+    inputs.property('runtimeVersion', System.getProperty('java.runtime.version'))
+    inputs.property('nativePlatform', analyzerPlatform.id)
+    outputs.dir(analyzerImage)
+    doFirst {
+        // 只清理本任务拥有的暂存目录；新镜像生成失败时，已有可运行镜像保持完整。
+        def root = analyzerReleaseRoot.canonicalFile.toPath()
+        def staging = analyzerStagingRoot.canonicalFile.toPath()
+        if (!staging.startsWith(root) || staging == root
+                || java.nio.file.Files.isSymbolicLink(analyzerStagingRoot.toPath())) {
+            throw new GradleException('镜像暂存目录超出发布目录或为符号链接，停止清理')
+        }
+        delete(analyzerStagingRoot)
+    }
+    executable jpackageExecutable
+    args '--type', 'app-image', '--name', 'ProtoLens',
+            '--input', layout.buildDirectory.dir('distribution-input').get().asFile.absolutePath,
+            '--dest', analyzerStagingRoot.absolutePath,
+            '--main-jar', 'protolens.jar', '--app-version', analyzerVersion,
+            '--icon', file("${layout.buildDirectory.get().asFile}/generated-resources/desktop/${analyzerPlatform.icon}").absolutePath,
+            '--vendor', 'Stupidbird', '--add-modules', 'java.se,jdk.unsupported,jdk.crypto.ec,jdk.zipfs'
+    if (analyzerPlatform.os == 'macos') {
+        args '--mac-package-identifier', 'com.lashouwan.protolens'
+    }
+    doLast {
+        def staged = new File(analyzerStagingRoot, analyzerPlatform.imageName)
+        if (!new File(staged, analyzerPlatform.launcher).isFile()) {
+            throw new GradleException('新镜像缺少平台启动程序，保留原镜像')
+        }
+        def root = analyzerReleaseRoot.canonicalFile.toPath()
+        if (!analyzerImage.canonicalFile.toPath().startsWith(root)
+                || java.nio.file.Files.isSymbolicLink(analyzerImage.toPath())
+                || java.nio.file.Files.isSymbolicLink(analyzerImageRoot.toPath())) {
+            throw new GradleException('应用镜像目录超出发布目录或为符号链接，停止替换')
+        }
+        def backup = new File(analyzerReleaseRoot, '.app-image-backup-' + UUID.randomUUID())
+        analyzerImageRoot.mkdirs()
+        boolean movedOld = false
+        try {
+            if (analyzerImage.exists()) {
+                java.nio.file.Files.move(analyzerImage.toPath(), backup.toPath())
+                movedOld = true
+            }
+            java.nio.file.Files.move(staged.toPath(), analyzerImage.toPath())
+        } catch (Exception failure) {
+            if (movedOld && !analyzerImage.exists()) {
+                java.nio.file.Files.move(backup.toPath(), analyzerImage.toPath())
+            }
+            throw new GradleException('无法替换应用镜像，请关闭正在使用此输出目录的协议分析工作台后重试；原镜像已保留', failure)
+        }
+        // Windows可能暂时锁住旧运行文件；新镜像已发布，不因此把成功构建报为失败。
+        if (backup.exists()) {
+            try { delete(backup) }
+            catch (Exception ignored) { logger.warn('新镜像已更新，旧文件仍被占用，保留于 {}', backup) }
+        }
+        delete(analyzerStagingRoot)
+        logger.lifecycle('应用镜像已更新：{}', analyzerImage)
+    }
+}
+
+// 安装包额外依赖WiX 3；先验证真实工具，避免生成镜像后才收到jpackage的含糊错误。
+tasks.register('verifyInstallerTools') {
+    group = 'verification'
+    description = 'Check WiX 3 candle.exe and light.exe before packaging the Windows installer.'
+    dependsOn 'verifyPackagingPlatform'
+    doLast {
+        if (analyzerPlatform.os != 'windows') {
+            def tools = analyzerPlatform.os == 'linux'
+                    ? (installerType == 'deb' ? ['dpkg-deb', 'fakeroot'] : ['rpmbuild']) : ['hdiutil', 'xcrun']
+            if (analyzerPlatform.os == 'macos' && installerType == 'pkg') {
+                tools = ['pkgbuild', 'productbuild', 'xcrun']
+            }
+            def missing = tools.findAll { tool ->
+                !(System.getenv('PATH') ?: '').split(java.util.regex.Pattern.quote(File.pathSeparator))
+                        .any { directory -> new File(directory, tool).canExecute() }
+            }
+            if (!missing.isEmpty()) {
+                throw new GradleException("打包${installerType}缺少工具：${missing.join(', ')}；请按README安装系统打包依赖")
+            }
+            logger.lifecycle('本机安装包工具检查通过：{}', tools.join(', '))
+            return
+        }
+        def explicitDirectory = providers.gradleProperty('analyzerWixDir').orNull
+        def directories = explicitDirectory != null
+                ? [file(explicitDirectory)]
+                : (System.getenv('PATH') ?: '').split(java.util.regex.Pattern.quote(File.pathSeparator))
+                        .findAll { !it.isBlank() }.collect { file(it.replace('"', '')) }
+        def tools = ['candle.exe', 'light.exe']
+        def wixDirectory = directories.find { directory ->
+            tools.every { tool -> new File(directory, tool).isFile() }
+        }
+        if (wixDirectory == null) {
+            def location = explicitDirectory != null ? file(explicitDirectory).absolutePath : 'PATH'
+            throw new GradleException("未找到WiX 3工具 candle.exe 和 light.exe，检查位置：${location}。"
+                    + '请按README安装WiX 3.14.1，-PanalyzerWixDir必须指向实际包含这两个文件的目录；'
+                    + 'C:/tools/wix/bin只是示例路径。仅打包便携版请运行 :analyzer:packagePortable，无需WiX。')
+        }
+        logger.lifecycle('WiX工具检查通过：{}', wixDirectory)
+    }
+}
+
+tasks.named('packageAppImage') { mustRunAfter 'verifyInstallerTools' }
+tasks.named('updateDesktopIcons') { mustRunAfter 'verifyPackagingPlatform', 'verifyInstallerTools' }
+tasks.named('stageDistribution') { mustRunAfter 'verifyPackagingPlatform', 'verifyInstallerTools' }
+
+tasks.register('packageInstaller', Exec) {
+    dependsOn 'verifyInstallerTools', 'packageAppImage'
+    executable jpackageExecutable
+    if (analyzerPlatform.os == 'windows' && project.hasProperty('analyzerWixDir')) {
+        environment 'PATH', file(project.property('analyzerWixDir')).absolutePath + File.pathSeparator + System.getenv('PATH')
+    }
+    args '--type', installerType, '--name', 'ProtoLens',
+            '--app-image', analyzerImage.absolutePath,
+            '--dest', installerStaging.absolutePath,
+            '--app-version', analyzerVersion, '--vendor', 'Stupidbird',
+            '--icon', file("${layout.buildDirectory.get().asFile}/generated-resources/desktop/${analyzerPlatform.icon}").absolutePath
+    if (analyzerPlatform.os == 'windows') {
+        args '--win-upgrade-uuid', analyzerUpgradeUuid,
+                '--win-per-user-install', '--win-shortcut', '--win-menu', '--win-dir-chooser'
+    } else if (analyzerPlatform.os == 'macos') {
+        args '--mac-package-identifier', 'com.lashouwan.protolens'
+    } else {
+        args '--linux-package-name', 'protolens', '--linux-shortcut', '--linux-menu-group', 'Development',
+                '--linux-app-category', 'Development', '--linux-app-release', '1'
+    }
+    doFirst {
+        if (java.nio.file.Files.isSymbolicLink(installerStaging.toPath())
+                || installerStaging.canonicalFile.parentFile != analyzerReleaseRoot.canonicalFile) {
+            throw new GradleException('安装包暂存目录越界或为符号链接')
+        }
+        delete(installerStaging)
+    }
+    doLast {
+        def generated = fileTree(installerStaging) { include "*.${installerType}" }.files
+        if (generated.size() != 1) {
+            throw new GradleException('未生成唯一安装包，保留上一份发布文件')
+        }
+        def installer = generated.first()
+        // 安装器单独请求管理员权限，避免覆盖升级清理Config.Msi时逐文件出现1926错误。
+        // 不改MSI当前用户范围，不改协议分析工作台本身的运行权限，也不放宽系统目录ACL。
+        if (analyzerPlatform.os == 'windows') { project.exec {
+            commandLine 'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                    file('tools/Set-InstallerManifest.ps1').absolutePath, '-InstallerPath',
+                    installer.absolutePath
+        } }
+        // 权限清单校验成功后才发布；固定文件名原子替换，构建失败时保留上一份可用安装包。
+        def intermediate = new File(analyzerReleaseRoot, "installer/ProtoLens-${analyzerVersion}-${analyzerPlatform.id}.${installerType}")
+        intermediate.parentFile.mkdirs()
+        java.nio.file.Files.copy(installer.toPath(), intermediate.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        publishInstaller(intermediate, file("release/${analyzerPlatform.id}"))
+        if (analyzerPlatform.os == 'windows') {
+            publishInstaller(intermediate, file('release'))
+        }
+        delete(installerStaging)
+    }
+}
+
+tasks.register('packagePortable', analyzerPlatform.os == 'windows' ? Zip : Exec) {
+    dependsOn 'packageAppImage'
+    if (analyzerPlatform.os == 'windows') {
+        from(analyzerImage) { into analyzerPlatform.imageName }
+        destinationDirectory = new File(analyzerReleaseRoot, 'distributions')
+        archiveFileName = "ProtoLens-${analyzerVersion}-${analyzerPlatform.id}.zip"
+    } else {
+        def archive = new File(analyzerReleaseRoot, "distributions/ProtoLens-${analyzerVersion}-${analyzerPlatform.id}.tar.gz")
+        inputs.dir(analyzerImage)
+        outputs.file(archive)
+        // 使用本机tar保留运行时的可执行位与符号链接，不通过普通文件复制改写镜像结构。
+        commandLine 'tar', '-czf', archive.absolutePath, '-C', analyzerImageRoot.absolutePath, analyzerPlatform.imageName
+        doFirst { archive.parentFile.mkdirs() }
+    }
+}

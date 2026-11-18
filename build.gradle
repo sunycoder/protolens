@@ -1,0 +1,121 @@
+plugins { id 'application' }
+
+apply from: 'gradle/platform.gradle'
+
+repositories { mavenCentral() }
+description = '独立的竞品游戏抓包解码与协议分析工作台'
+java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+application { mainClass = 'com.lashouwan.protolens.ProtoLensMain' }
+configurations { javaFormatter }
+dependencies {
+    javaFormatter 'com.google.googlejavaformat:google-java-format:1.24.0:all-deps'
+    implementation platform('com.fasterxml.jackson:jackson-bom:2.21.4')
+    implementation 'com.fasterxml.jackson.core:jackson-databind'
+    implementation 'io.vertx:vertx-web:4.5.28'
+    implementation 'org.slf4j:slf4j-api:2.0.17'
+    runtimeOnly 'org.apache.logging.log4j:log4j-slf4j2-impl:2.24.3'
+    runtimeOnly 'org.apache.logging.log4j:log4j-core:2.24.3'
+    testImplementation platform('org.junit:junit-bom:5.11.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+tasks.named('test') { useJUnitPlatform() }
+def npmCommand = System.getProperty('os.name').toLowerCase().contains('windows') ? 'npm.cmd' : 'npm'
+def clientDirectory = providers.gradleProperty('competitorDir')
+
+// 与 debugger 保持一致：仅处理本模块源码，不扫描数据、构建输出和其他模块。
+['formatJava': ['--aosp', '--replace'],
+ 'checkJavaFormat': ['--aosp', '--dry-run', '--set-exit-if-changed']].each { taskName, formatterArgs ->
+    tasks.register(taskName, JavaExec) {
+        group = taskName == 'formatJava' ? 'formatting' : 'verification'
+        description = taskName == 'formatJava' ? '格式化本模块 Java 源码（四空格 AOSP）。' : '检查 Java 格式，不修改文件。'
+        classpath = configurations.javaFormatter
+        mainClass = 'com.google.googlejavaformat.java.Main'
+        javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+        args formatterArgs
+        args fileTree('src') { include '**/*.java' }.files.sort { it.absolutePath }*.absolutePath
+        ['api', 'file', 'parser', 'tree', 'util', 'code'].each { compilerPackage ->
+            jvmArgs "--add-exports=jdk.compiler/com.sun.tools.javac.${compilerPackage}=ALL-UNNAMED"
+        }
+    }
+}
+
+tasks.register('webFormat', Exec) {
+    group = 'formatting'
+    description = '格式化本模块 Vue、TypeScript、CSS 和前端配置。'
+    dependsOn 'webInstall'
+    workingDir 'web'
+    commandLine npmCommand, 'run', 'format'
+}
+tasks.register('checkWebFormat', Exec) {
+    group = 'verification'
+    description = '检查前端格式，不修改文件。'
+    dependsOn 'webInstall'
+    workingDir 'web'
+    commandLine npmCommand, 'run', 'format:check'
+}
+tasks.register('format') {
+    group = 'formatting'
+    description = '一键格式化本模块 Java 和前端源码。'
+    dependsOn 'formatJava', 'webFormat'
+}
+tasks.register('checkFormat') {
+    group = 'verification'
+    description = '检查本模块 Java 和前端格式，不修改文件。'
+    dependsOn 'checkJavaFormat', 'checkWebFormat'
+}
+tasks.register('webInstall', Exec) {
+    workingDir 'web'
+    commandLine npmCommand, 'ci', '--no-audit', '--no-fund'
+    inputs.property('nativePlatform', System.getProperty('os.name') + '-' + System.getProperty('os.arch'))
+    inputs.files('web/package.json', 'web/package-lock.json')
+    outputs.file('web/node_modules/.package-lock.json')
+}
+tasks.register('extractCatalog', Exec) {
+    description = '静态提取竞品协议字典；-PcompetitorDir=客户端目录，不执行客户端脚本。'
+    dependsOn 'webInstall'
+    doFirst {
+        if (!clientDirectory.isPresent()) {
+            throw new GradleException('请提供 -PcompetitorDir=<竞品客户端目录>')
+        }
+        commandLine 'node', 'tools/extract-catalog.mjs', clientDirectory.get(), 'data/catalog.json'
+    }
+}
+tasks.register('webBuild', Exec) {
+    dependsOn 'webInstall'
+    workingDir 'web'
+    commandLine npmCommand, 'run', 'build'
+    inputs.dir('web/src')
+    inputs.dir('web/public')
+    inputs.files('web/index.html', 'web/vite.config.ts', 'web/tsconfig.json', 'web/package.json', 'web/package-lock.json')
+    outputs.dir('web/dist')
+}
+tasks.named('run') {
+    dependsOn 'webBuild'
+    workingDir projectDir
+    if (project.hasProperty('analyzerArgs')) {
+        args org.apache.tools.ant.types.Commandline.translateCommandline(project.property('analyzerArgs').toString())
+    }
+}
+tasks.named('jar') { dependsOn 'webBuild' }
+distributions.main.contents {
+    from('web/dist') { into 'web' }
+    from('tools') { into 'tools'; include 'extract-catalog.mjs', 'mitmproxy_collector.py', 'WindowsSystemProxy.ps1', 'WindowsSystemProxy.cs' }
+    from('config') { into 'config' }
+    from('web/package.json') { into 'web' }
+    from('web/node_modules/acorn') { into 'web/node_modules/acorn' }
+}
+
+// IDE 与根工程启动均使用同一组显式可覆盖的本机参数，不修改共享部署配置。
+tasks.withType(JavaExec).configureEach {
+    jvmArgs '-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8', '-Dstderr.encoding=UTF-8'
+    def overrides = [analyzerPort: 'analyzer.port', analyzerData: 'analyzer.data', analyzerMode: 'analyzer.mode',
+                     analyzerOpenBrowser: 'analyzer.openBrowser', analyzerWeb: 'analyzer.web',
+                     analyzerDevOrigin: 'analyzer.devOrigin', analyzerConfig: 'analyzer.config']
+    overrides.each { argument, property ->
+        if (project.hasProperty(argument)) { systemProperty property, project.property(argument).toString() }
+    }
+}
+
+apply from: 'gradle/packaging.gradle'

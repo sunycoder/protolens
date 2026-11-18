@@ -1,0 +1,2 @@
+// 可脱离游戏服务独立构建，避免启动 MongoDB、Redis 或 Dubbo。
+rootProject.name = 'protolens'

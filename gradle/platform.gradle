@@ -1,0 +1,52 @@
+// 发布平台只由当前JDK所在的操作系统与架构决定；不提供伪跨平台开关，避免把Windows运行时装进Mac包。
+ext.analyzerPlatformFor = { String osName, String architecture ->
+    def name = osName.toLowerCase(Locale.ROOT)
+    def os = name.contains('mac') || name.contains('darwin') ? 'macos'
+            : name.startsWith('windows') ? 'windows' : name.contains('linux') ? 'linux' : null
+    def arch = ['amd64', 'x86_64', 'x64'].contains(architecture.toLowerCase(Locale.ROOT)) ? 'x64'
+            : ['aarch64', 'arm64'].contains(architecture.toLowerCase(Locale.ROOT)) ? 'arm64' : null
+    if (os == null || arch == null || (os == 'windows' && arch != 'x64')) {
+        throw new GradleException("不支持的构建平台：${osName}/${architecture}；支持Windows x64、macOS/Linux x64与arm64")
+    }
+    [os: os, arch: arch, id: "${os}-${arch}".toString(),
+     executableSuffix: os == 'windows' ? '.exe' : '',
+     npm: os == 'windows' ? 'npm.cmd' : 'npm',
+     imageName: os == 'macos' ? 'ProtoLens.app' : 'ProtoLens',
+     launcher: os == 'windows' ? 'ProtoLens.exe' : os == 'macos' ? 'Contents/MacOS/ProtoLens' : 'bin/ProtoLens',
+     icon: os == 'windows' ? 'protolens.ico' : os == 'macos' ? 'protolens.icns' : 'protolens-256.png',
+     installers: os == 'windows' ? ['exe'] : os == 'macos' ? ['dmg', 'pkg'] : ['deb', 'rpm']].asImmutable()
+}
+ext.analyzerPlatform = analyzerPlatformFor(System.getProperty('os.name'), System.getProperty('os.arch'))
+
+tasks.register('printPackagingPlatform') {
+    group = 'distribution'
+    description = 'Print the native packaging platform and accepted installer types.'
+    doLast {
+        logger.lifecycle('构建平台：{}；安装格式：{}', analyzerPlatform.id, analyzerPlatform.installers.join(', '))
+    }
+}
+
+// 只核对平台选择合同；真正的本机启动/安装仍须在对应操作系统验收，不把矩阵检查当作跨平台构建成功。
+tasks.register('checkPackagingPlatforms') {
+    group = 'verification'
+    doLast {
+        def cases = [
+                ['Windows 11', 'amd64', 'windows-x64', 'ProtoLens.exe'],
+                ['Mac OS X', 'aarch64', 'macos-arm64', 'Contents/MacOS/ProtoLens'],
+                ['Darwin', 'x86_64', 'macos-x64', 'Contents/MacOS/ProtoLens'],
+                ['Linux', 'amd64', 'linux-x64', 'bin/ProtoLens'],
+                ['Linux', 'arm64', 'linux-arm64', 'bin/ProtoLens']]
+        cases.each { row ->
+            def selected = analyzerPlatformFor(row[0], row[1])
+            assert selected.id == row[2]
+            assert selected.launcher == row[3]
+        }
+        [['Windows 11', 'aarch64'], ['Linux', 'riscv64'], ['FreeBSD', 'amd64']].each { row ->
+            boolean rejected = false
+            try { analyzerPlatformFor(row[0], row[1]) }
+            catch (GradleException expected) { rejected = true }
+            assert rejected : "不支持的平台应拒绝：${row}"
+        }
+        logger.lifecycle('5组平台选择及3组不支持平台检查通过')
+    }
+}
