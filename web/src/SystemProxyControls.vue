@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onMounted, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, post } from "./types";
 interface ProxyStatus {
@@ -15,6 +15,15 @@ interface ProxyStatus {
   message: string;
 }
 const state = ref<ProxyStatus>();
+defineProps<{ compact?: boolean }>();
+const emit = defineEmits<{ changed: [status: ProxyStatus] }>();
+watch(state, (value) => {
+  if (value) emit("changed", value);
+});
+async function refresh() {
+  state.value = await api<ProxyStatus>("/api/system-proxy");
+}
+defineExpose({ refresh });
 const busy = ref(false);
 const error = ref("");
 let prompted = false;
@@ -86,6 +95,7 @@ onMounted(async () => {
   <span class="system-proxy-controls">
     <template v-if="state?.supported">
       <el-tag
+        v-if="!compact"
         size="small"
         :type="state.managed ? 'success' : 'info'"
         :title="state.current"

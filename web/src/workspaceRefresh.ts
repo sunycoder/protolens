@@ -65,7 +65,8 @@ export function reconcileRows(
       existing.connection === item.connection &&
       existing.time === item.time &&
       existing.status === item.status &&
-      existing.protocolId === item.protocolId
+      existing.protocolId === item.protocolId &&
+      existing.preview === item.preview
       ? existing
       : item;
   });

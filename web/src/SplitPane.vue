@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
 import { constrainSplit } from "./splitGeometry";
 
 /** 可复用双栏分隔器；只管理布局，不销毁槽内容，也不访问协议、会话或消息状态。 */
@@ -12,6 +19,8 @@ const props = withDefaults(
     minimumSecondary: number;
     initialRatio?: number;
     stackBelow?: number;
+    secondaryCollapsed?: boolean;
+    secondaryOverlay?: boolean;
   }>(),
   { initialRatio: 0.5, stackBelow: 0 },
 );
@@ -35,14 +44,24 @@ const size = computed(() =>
   ),
 );
 const primaryStyle = computed(() =>
-  stacked.value ? {} : { flexBasis: `${size.value}px` },
+  props.secondaryCollapsed || props.secondaryOverlay
+    ? { flex: "1 1 0" }
+    : stacked.value
+      ? {}
+      : { flexBasis: `${size.value}px` },
 );
 const innerStyle = computed(() =>
-  stacked.value
-    ? {}
-    : vertical.value
-      ? { minHeight: `${props.minimumPrimary + props.minimumSecondary + 7}px` }
-      : { minWidth: `${props.minimumPrimary + props.minimumSecondary + 7}px` },
+  props.secondaryCollapsed || props.secondaryOverlay
+    ? { minWidth: "0", minHeight: "0" }
+    : stacked.value
+      ? {}
+      : vertical.value
+        ? {
+            minHeight: `${props.minimumPrimary + props.minimumSecondary + 7}px`,
+          }
+        : {
+            minWidth: `${props.minimumPrimary + props.minimumSecondary + 7}px`,
+          },
 );
 function save() {
   try {
@@ -107,18 +126,40 @@ function reset() {
   ratio.value = props.initialRatio;
   save();
 }
+defineExpose({ reset });
 function measure() {
   stacked.value = !!props.stackBelow && window.innerWidth <= props.stackBelow;
   extent.value =
     (vertical.value ? root.value?.clientHeight : root.value?.clientWidth) || 0;
 }
-onMounted(() => {
+function restoreRatio() {
+  ratio.value = props.initialRatio;
   try {
     const stored = Number(localStorage.getItem(props.storageKey));
     if (stored > 0 && stored < 1) ratio.value = stored;
   } catch {
-    /* 使用默认布局。 */
+    /* 布局偏好不可读时使用默认比例。 */
   }
+}
+watch(
+  () => [props.direction, props.storageKey],
+  async () => {
+    stopGesture();
+    restoreRatio();
+    await nextTick();
+    measure();
+  },
+);
+watch(
+  () => props.secondaryCollapsed,
+  async () => {
+    stopGesture();
+    await nextTick();
+    measure();
+  },
+);
+onMounted(() => {
+  restoreRatio();
   observer = new ResizeObserver(measure);
   if (root.value) observer.observe(root.value);
   window.addEventListener("resize", measure);
@@ -131,13 +172,22 @@ onBeforeUnmount(() => {
 });
 </script>
 <template>
-  <div ref="root" class="split-pane" :class="{ vertical, stacked, dragging }">
+  <div
+    ref="root"
+    class="split-pane"
+    :class="{
+      vertical,
+      stacked,
+      dragging,
+      'secondary-collapsed': secondaryCollapsed,
+    }"
+  >
     <div class="split-inner" :style="innerStyle">
       <div class="split-primary" :style="primaryStyle">
         <slot name="primary" />
       </div>
       <div
-        v-if="!stacked"
+        v-if="!stacked && !secondaryCollapsed && !secondaryOverlay"
         class="split-handle"
         role="separator"
         tabindex="0"
@@ -153,17 +203,35 @@ onBeforeUnmount(() => {
       >
         <i></i>
       </div>
-      <div class="split-secondary"><slot name="secondary" /></div>
+      <div
+        v-show="!secondaryCollapsed"
+        class="split-secondary"
+        :class="{ 'split-overlay': secondaryOverlay }"
+      >
+        <slot name="secondary" />
+      </div>
     </div>
   </div>
 </template>
 <style scoped>
 .split-pane {
+  position: relative;
   width: 100%;
   height: 100%;
   min-width: 0;
   min-height: 0;
   overflow: auto;
+}
+.split-secondary.split-overlay {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(560px, 94%);
+  z-index: 20;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: -6px 0 20px #0002;
 }
 .split-inner {
   display: flex;

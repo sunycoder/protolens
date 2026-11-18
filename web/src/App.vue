@@ -1,18 +1,38 @@
 <script setup lang="ts">
 import {
   computed,
+  nextTick,
   onBeforeUnmount,
   onMounted,
   ref,
   shallowRef,
   watch,
 } from "vue";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { ElMessage, ElMessageBox, type TableInstance } from "element-plus";
 import JsonTree from "./JsonTree.vue";
 import SplitPane from "./SplitPane.vue";
 import LiveCapturePanel from "./LiveCapturePanel.vue";
 import AiAnalysisPanel from "./AiAnalysisPanel.vue";
 import CollectorSettingsPanel from "./CollectorSettingsPanel.vue";
+import MessageComparison from "./MessageComparison.vue";
+import HighlightedText from "./HighlightedText.vue";
+import {
+  defaultColumns,
+  readColumns,
+  listMinimumWidth,
+  chooseDetailLayout,
+  contextQuery,
+  contextRankParams,
+  allowReadingShortcut,
+  ResultPublication,
+  type WorkspaceQuery,
+  type DetailLayout,
+} from "./workspaceInteractions";
+import {
+  findFieldMatches,
+  neighbourPage,
+  pageContaining,
+} from "./analysisWorkspace";
 import { api, post, type Capture, type Packet, type Page } from "./types";
 import {
   reconcileRows,
@@ -23,16 +43,91 @@ import {
 } from "./workspaceRefresh";
 
 const livePanel = ref<InstanceType<typeof LiveCapturePanel>>();
+const packetTable = ref<TableInstance>();
 const captures = shallowRef<Capture[]>([]);
 const capture = shallowRef<Capture>();
 const selected = shallowRef<Packet>();
 const rows = shallowRef<Packet[]>([]);
 const total = ref(0);
 const page = ref(1);
+const pageOffset = ref(0);
+const displayedPage = ref(1);
+const displayedQuery = shallowRef<WorkspaceQuery>();
+const pendingQuery = shallowRef<WorkspaceQuery>();
+const queryError = ref("");
+const displayedAt = ref("");
+const queryPublication = new ResultPublication<{
+  query: WorkspaceQuery;
+  result: Page;
+}>();
+const detailLoading = ref(false);
+const detailError = ref("");
+const detailTarget = shallowRef<Packet>();
+const expandedTags = ref(false);
+const columns = ref(readColumns(localStorage.getItem("analyzer.columns.v3")));
+const tableRevision = ref(0);
+const splitPane = ref<InstanceType<typeof SplitPane>>();
+const dataRegion = ref<HTMLElement>();
+const regionSize = shallowRef({
+  width: window.innerWidth,
+  height: window.innerHeight - 190,
+});
+let regionObserver: ResizeObserver | undefined;
 const busy = ref(false);
 const loading = ref(false);
 const interactiveLoading = ref(false);
-const showAdvancedColumns = ref(false);
+const sidebarCollapsed = ref(
+  localStorage.getItem("analyzer.sidebarCollapsed") !== "false",
+);
+const detailOpen = ref(false);
+const focusMode = ref(false);
+const savedDock = localStorage.getItem("analyzer.layoutPreference.v3");
+const detailDock = ref<DetailLayout>(
+  ["auto", "right", "bottom", "overlay"].includes(savedDock || "")
+    ? (savedDock as DetailLayout)
+    : "auto",
+);
+const listWidth = computed(() => listMinimumWidth(columns.value));
+const effectiveLayout = computed(() =>
+  chooseDetailLayout(
+    regionSize.value.width,
+    regionSize.value.height,
+    detailDock.value,
+    listWidth.value,
+  ),
+);
+const detailDirection = computed(() =>
+  effectiveLayout.value === "bottom" ? "vertical" : "horizontal",
+);
+const sidebarVisible = computed(
+  () => !focusMode.value && (!sidebarCollapsed.value || !capture.value),
+);
+const detailVisible = computed(() => detailOpen.value && !focusMode.value);
+function measureWorkspace() {
+  const rect = dataRegion.value?.getBoundingClientRect();
+  if (rect)
+    regionSize.value = {
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    };
+}
+watch(sidebarCollapsed, (value) =>
+  localStorage.setItem("analyzer.sidebarCollapsed", String(value)),
+);
+watch(detailDock, (value) =>
+  localStorage.setItem("analyzer.layoutPreference.v3", value),
+);
+watch(
+  columns,
+  (value) => localStorage.setItem("analyzer.columns.v3", JSON.stringify(value)),
+  { deep: true },
+);
+watch([detailDirection, detailVisible, sidebarVisible], async () => {
+  const top = tableScrollTop();
+  await nextTick();
+  packetTable.value?.doLayout();
+  packetTable.value?.setScrollTop(top);
+});
 const health = ref({
   ready: false,
   catalog: {
@@ -46,7 +141,14 @@ const health = ref({
 const search = ref("");
 const protocolId = ref("");
 const messageIndex = ref("");
+const appliedProtocolId = ref("");
+const appliedMessageIndex = ref("");
 const jumpTarget = ref<number>();
+const locatedRow = ref<number>();
+const advancedFilters = ref(false);
+const tableSettings = ref(false);
+const comparisonBase = shallowRef<Packet>();
+const comparisonDialog = ref(false);
 const order = ref(localStorage.getItem("analyzer.order") || "desc");
 const include = ref("");
 const exclude = ref("");
@@ -379,6 +481,292 @@ const viewingTail = ref(false);
 const unread = shallowRef<Record<string, number>>({});
 const appliedSearch = ref("");
 const selectedRowIndex = ref<number>();
+const contextScope = ref<"connection" | "all">("connection");
+const contextAnchor = shallowRef<Packet>();
+interface SearchOrigin {
+  captureId: string;
+  search: string;
+  appliedSearch: string;
+  protocolId: string;
+  messageIndex: string;
+  appliedProtocolId: string;
+  appliedMessageIndex: string;
+  include: string;
+  exclude: string;
+  appliedInclude: string;
+  appliedExclude: string;
+  direction: string;
+  status: string;
+  connection: string;
+  selectedRange: string;
+  hideHeartbeat: boolean;
+  order: string;
+  page: number;
+  scrollTop: number;
+  selectedIndex?: number;
+  tab: string;
+  viewingTail: boolean;
+  query: WorkspaceQuery;
+}
+const searchOrigin = shallowRef<SearchOrigin>();
+const detailQuery = computed(
+  () => displayedQuery.value?.q || searchOrigin.value?.query.q || "",
+);
+const fieldMatches = computed(() =>
+  findFieldMatches(selected.value?.body, detailQuery.value),
+);
+const matchPaths = computed(() =>
+  fieldMatches.value.matches.map((item) => item.path),
+);
+const focusedField = ref("");
+const hasPrevious = computed(
+  () =>
+    !!neighbourPage(
+      displayedPage.value,
+      rows.value.findIndex((item) => item.index === selectedRowIndex.value),
+      rows.value.length,
+      total.value,
+      -1,
+      100,
+      pageOffset.value,
+    ),
+);
+const hasNext = computed(
+  () =>
+    !!neighbourPage(
+      displayedPage.value,
+      rows.value.findIndex((item) => item.index === selectedRowIndex.value),
+      rows.value.length,
+      total.value,
+      1,
+      100,
+      pageOffset.value,
+    ),
+);
+const activeFilters = computed(() => {
+  if (!displayedQuery.value) return [];
+  const q = displayedQuery.value;
+  const result: { key: string; label: string; value?: string }[] = [];
+  if (q.q) result.push({ key: "search", label: `搜索：${q.q}` });
+  if (q.protocolId)
+    result.push({
+      key: "protocolId",
+      label: `协议 ID：${q.protocolId}`,
+    });
+  if (q.messageIndex)
+    result.push({
+      key: "messageIndex",
+      label: `消息序号：${q.messageIndex}`,
+    });
+  for (const [key, text, prefix] of [
+    ["include", q.include, "仅看"],
+    ["exclude", q.exclude, "排除"],
+  ]) {
+    for (const value of text.split(/[,，\s]+/).filter(Boolean))
+      result.push({ key, label: `${prefix}：${value}`, value });
+  }
+  if (q.direction)
+    result.push({ key: "direction", label: `方向：${q.direction}` });
+  if (q.status)
+    result.push({
+      key: "status",
+      label: `状态：${statusText[q.status] || q.status}`,
+    });
+  if (q.connection)
+    result.push({
+      key: "connection",
+      label: `连接：${q.connection.slice(0, 8)}`,
+    });
+  if (q.range)
+    result.push({
+      key: "range",
+      label: `区间：${capture.value?.marks[Number(q.range) - 1]?.name || q.range}`,
+    });
+  if (q.hideHeartbeat) result.push({ key: "heartbeat", label: "隐藏心跳" });
+  return result;
+});
+const visibleFilters = computed(() =>
+  expandedTags.value ? activeFilters.value : activeFilters.value.slice(0, 3),
+);
+function currentQuery(): WorkspaceQuery {
+  return {
+    q: appliedSearch.value,
+    protocolId: appliedProtocolId.value,
+    messageIndex: appliedMessageIndex.value,
+    include: appliedInclude.value,
+    exclude: appliedExclude.value,
+    direction: direction.value,
+    status: status.value,
+    connection: connection.value,
+    hideHeartbeat: hideHeartbeat.value,
+    order: order.value,
+    range: selectedRange.value,
+  };
+}
+function applyQuery(q: WorkspaceQuery) {
+  search.value = appliedSearch.value = q.q;
+  protocolId.value = appliedProtocolId.value = q.protocolId;
+  messageIndex.value = appliedMessageIndex.value = q.messageIndex;
+  include.value = appliedInclude.value = q.include;
+  exclude.value = appliedExclude.value = q.exclude;
+  direction.value = q.direction;
+  status.value = q.status;
+  connection.value = q.connection;
+  hideHeartbeat.value = q.hideHeartbeat;
+  order.value = q.order;
+  selectedRange.value = q.range;
+}
+function cancelQuery(message = "已取消本次查询，保留上次成功结果") {
+  messageGate.cancel();
+  queryPublication.cancel();
+  loading.value = false;
+  interactiveLoading.value = false;
+  pendingQuery.value = undefined;
+  queryError.value = message;
+}
+async function resetLayout() {
+  const top = tableScrollTop();
+  columns.value = { ...defaultColumns };
+  detailDock.value = "auto";
+  sidebarCollapsed.value = true;
+  focusMode.value = false;
+  expandedTags.value = false;
+  for (const direction of ["horizontal", "vertical"])
+    localStorage.removeItem(`analyzer.split.${direction}.v3`);
+  splitPane.value?.reset();
+  tableRevision.value++;
+  await nextTick();
+  packetTable.value?.setCurrentRow(
+    rows.value.find((item) => item.index === selectedRowIndex.value),
+  );
+  packetTable.value?.setScrollTop(top);
+  ElMessage.success("已恢复默认布局，消息、查询条件和选中行已保留");
+}
+function handleWorkspaceKey(event: KeyboardEvent) {
+  const target = event.target as HTMLElement | null;
+  const editing =
+    !!target?.isContentEditable ||
+    !!target?.closest(
+      "input,textarea,select,[contenteditable=true],[role=combobox],[role=separator],[role=slider]",
+    );
+  const modal = Array.from(
+    document.querySelectorAll<HTMLElement>(
+      ".el-dialog,.el-overlay-message-box,.el-popper",
+    ),
+  ).some((node) => {
+    const r = node.getBoundingClientRect();
+    return (
+      r.width > 0 &&
+      r.height > 0 &&
+      getComputedStyle(node).visibility !== "hidden"
+    );
+  });
+  if (
+    !allowReadingShortcut(
+      event.key,
+      editing,
+      modal,
+      event.altKey || event.ctrlKey || event.metaKey || event.shiftKey,
+    )
+  )
+    return;
+  if (event.key === "Escape") {
+    if (focusMode.value) focusMode.value = false;
+    else if (detailVisible.value) detailOpen.value = false;
+    else return;
+  } else {
+    if (selectedRowIndex.value === undefined || loading.value) return;
+    void neighbour(event.key === "ArrowUp" ? -1 : 1);
+  }
+  event.preventDefault();
+}
+
+function removeFilter(key: string, value?: string) {
+  if (displayedQuery.value) applyQuery(displayedQuery.value);
+  if (key === "search") search.value = "";
+  if (key === "protocolId") protocolId.value = "";
+  if (key === "messageIndex") messageIndex.value = "";
+  if (key === "direction") direction.value = "";
+  if (key === "status") status.value = "";
+  if (key === "connection") connection.value = "";
+  if (key === "range") selectedRange.value = "";
+  if (key === "heartbeat") hideHeartbeat.value = false;
+  if (key === "include")
+    include.value = appliedInclude.value
+      .split(/[,，\s]+/)
+      .filter((item) => item && item !== value)
+      .join(",");
+  if (key === "exclude")
+    exclude.value = appliedExclude.value
+      .split(/[,，\s]+/)
+      .filter((item) => item && item !== value)
+      .join(",");
+  filter();
+}
+function resetFilters() {
+  search.value =
+    protocolId.value =
+    messageIndex.value =
+    include.value =
+    exclude.value =
+      "";
+  direction.value = status.value = connection.value = selectedRange.value = "";
+  hideHeartbeat.value = false;
+  filter();
+}
+function tableScrollTop() {
+  return (
+    (packetTable.value?.$el as HTMLElement | undefined)?.querySelector(
+      ".el-table__body-wrapper .el-scrollbar__wrap",
+    )?.scrollTop || 0
+  );
+}
+async function revealRow(target: Packet) {
+  const id = capture.value?.id;
+  locatedRow.value = target.index;
+  void select(target);
+  await nextTick();
+  if (capture.value?.id !== id || selectedRowIndex.value !== target.index)
+    return;
+  const table = packetTable.value;
+  table?.setCurrentRow(target);
+  const position = rows.value.findIndex((item) => item.index === target.index);
+  const root = table?.$el as HTMLElement | undefined;
+  const row = root?.querySelectorAll<HTMLElement>(
+    ".el-table__body-wrapper .el-table__row",
+  )[position];
+  const viewport = root?.querySelector<HTMLElement>(
+    ".el-table__body-wrapper .el-scrollbar__wrap",
+  );
+  if (row && viewport)
+    table?.setScrollTop(
+      viewport.scrollTop +
+        row.getBoundingClientRect().top -
+        viewport.getBoundingClientRect().top -
+        (viewport.clientHeight - row.offsetHeight) / 2,
+    );
+}
+async function focusField(path: string) {
+  focusedField.value = path;
+  tab.value = "tree";
+  await nextTick();
+  const node = Array.from(
+    document.querySelectorAll<HTMLElement>(".detail-panel [data-json-path]"),
+  ).find((item) => item.dataset.jsonPath === path);
+  node?.scrollIntoView({ block: "center", inline: "nearest" });
+}
+watch([selected, detailQuery], async () => {
+  focusedField.value = fieldMatches.value.matches[0]?.path || "";
+  if (focusedField.value && tab.value === "tree")
+    await focusField(focusedField.value);
+});
+function setComparisonBase() {
+  if (!selected.value) return;
+  comparisonBase.value = selected.value;
+  ElMessage.success(
+    `已固定消息 #${selected.value.index}，选择另一条消息后点击“对比变化”`,
+  );
+}
 let listReloading = false;
 let pendingLive = false;
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -492,29 +880,64 @@ async function openLiveCapture(id: string) {
   }
   if (item) await openCapture(item);
 }
-async function loadMessages(tail = false, background = false) {
+interface MessageNavigation {
+  position?: number;
+  index?: number;
+  scrollTop?: number;
+  query?: WorkspaceQuery;
+  page?: number;
+  onCommit?: () => void;
+}
+const retryAction = shallowRef<() => Promise<void>>();
+function retryMessages() {
+  void retryAction.value?.();
+}
+async function loadMessages(
+  tail = false,
+  background = false,
+  navigation?: MessageNavigation,
+): Promise<void> {
   if (!capture.value) return;
   const id = capture.value.id;
+  const query = {
+    ...(navigation?.query || displayedQuery.value || currentQuery()),
+  };
+  const requestedPage = navigation?.page ?? page.value;
   const request = messageGate.begin();
+  const publication = queryPublication.begin();
   loading.value = true;
   interactiveLoading.value = !background;
+  pendingQuery.value = query;
+  queryError.value = "";
+  retryAction.value = async () => {
+    if (capture.value?.id === id)
+      await loadMessages(tail, false, {
+        ...navigation,
+        query,
+        page: requestedPage,
+      });
+  };
+  const timer = setTimeout(() => {
+    if (request.current())
+      cancelQuery("查询超过 30 秒，已停止等待；保留上次结果，可重试");
+  }, 30000);
   const params = new URLSearchParams({
-    q: appliedSearch.value,
-    protocolId: protocolId.value.trim(),
-    messageIndex: messageIndex.value.trim(),
-    order: order.value,
-    include: appliedInclude.value,
-    exclude: appliedExclude.value,
-    direction: direction.value,
-    status: status.value,
-    connection: connection.value,
-    hideHeartbeat: String(hideHeartbeat.value),
-    offset: String((page.value - 1) * 100),
+    q: query.q,
+    protocolId: query.protocolId,
+    messageIndex: query.messageIndex,
+    order: query.order,
+    include: query.include,
+    exclude: query.exclude,
+    direction: query.direction,
+    status: query.status,
+    connection: query.connection,
+    hideHeartbeat: String(query.hideHeartbeat),
+    offset: String((requestedPage - 1) * 100),
     limit: "100",
     tail: String(tail),
   });
-  if (selectedRange.value) {
-    const mark = capture.value.marks[Number(selectedRange.value) - 1];
+  if (query.range) {
+    const mark = capture.value.marks[Number(query.range) - 1];
     if (mark) {
       params.set("from", String(mark.from));
       params.set("to", String(mark.to));
@@ -524,34 +947,67 @@ async function loadMessages(tail = false, background = false) {
     const result = await api<Page>(`/api/captures/${id}/messages?${params}`, {
       signal: request.signal,
     });
-    if (!request.current() || capture.value?.id !== id) return;
+    if (
+      !Array.isArray(result.items) ||
+      result.capture?.id !== id ||
+      !Number.isInteger(result.total) ||
+      result.total < 0
+    )
+      throw new Error("查询结果格式异常，旧结果已保留");
+    if (
+      !request.current() ||
+      capture.value?.id !== id ||
+      !queryPublication.commit(publication, { query, result })
+    )
+      return;
+    // 条件、计数、页码和数据在同一次同步发布中更新，失败与取消不会发布半套状态。
+    navigation?.onCommit?.();
+    displayedQuery.value = query;
     rows.value = reconcileRows(rows.value, result.items);
     total.value = result.total;
+    pageOffset.value = result.offset ?? (requestedPage - 1) * 100;
+    displayedPage.value = Math.floor(pageOffset.value / 100) + 1;
+    page.value = displayedPage.value;
+    displayedAt.value = new Date().toLocaleTimeString();
     capture.value = result.capture;
-    if (jumpTarget.value !== undefined) {
-      const target = result.items.find(
-        (item) => item.index === jumpTarget.value,
-      );
-      if (target) {
-        jumpTarget.value = undefined;
-        void select(target);
-      }
-    }
-    // 已淘汰消息仍可暂留详情供阅读，但不冒充仍在当前缓存中。
     viewingTail.value = tail;
+    if (navigation?.position !== undefined) {
+      const target =
+        navigation.position < 0
+          ? rows.value.at(-1)
+          : rows.value[navigation.position];
+      if (target) await revealRow(target);
+    } else if (
+      navigation?.index !== undefined ||
+      jumpTarget.value !== undefined
+    ) {
+      const index = navigation?.index ?? jumpTarget.value;
+      const target = result.items.find((item) => item.index === index);
+      jumpTarget.value = undefined;
+      if (target) await revealRow(target);
+      else ElMessage.warning("目标消息已不在当前列表中，可能已被清空或淘汰");
+    }
+    if (!request.current() || capture.value?.id !== id) return;
+    if (navigation?.scrollTop !== undefined) {
+      await nextTick();
+      if (request.current())
+        packetTable.value?.setScrollTop(navigation.scrollTop);
+    }
     if (
       selected.value &&
       selected.value.index < (result.capture.firstIndex || 0)
-    ) {
+    )
       selectedRowIndex.value = undefined;
-    }
     unread.value = { ...unread.value, [id]: 0 };
   } catch (error) {
-    if (request.current()) failure(error);
+    if (request.current())
+      queryError.value = `本次查询未应用：${error instanceof Error ? error.message : String(error)}。${displayedQuery.value ? "下方保留上次成功结果" : "请重试载入"}`;
   } finally {
+    clearTimeout(timer);
     if (request.current()) {
       loading.value = false;
       interactiveLoading.value = false;
+      pendingQuery.value = undefined;
       if (pendingLive) {
         pendingLive = false;
         refreshTimer = setTimeout(() => {
@@ -572,11 +1028,26 @@ async function openCapture(item: Capture) {
     return;
   }
   messageGate.cancel();
+  queryPublication.cancel();
   detailGate.cancel();
+  displayedQuery.value = undefined;
+  displayedAt.value = "";
+  queryError.value = "";
+  pendingQuery.value = undefined;
+  detailError.value = "";
+  detailLoading.value = false;
+  detailTarget.value = undefined;
+  contextAnchor.value = undefined;
   if (refreshTimer) clearTimeout(refreshTimer);
   pendingLive = false;
+  jumpTarget.value = undefined;
+  searchOrigin.value = undefined;
+  locatedRow.value = undefined;
+  comparisonBase.value = undefined;
+  comparisonDialog.value = false;
   capture.value = item;
   selected.value = undefined;
+  detailOpen.value = false;
   selectedRowIndex.value = undefined;
   rows.value = [];
   browsingHistory.value = false;
@@ -586,33 +1057,132 @@ async function openCapture(item: Capture) {
   await loadMessages(autoFollow.value && item.liveState === "CAPTURING");
 }
 function filter() {
+  expandedTags.value = false;
+  jumpTarget.value = undefined;
+  locatedRow.value = undefined;
   appliedSearch.value = search.value.trim();
+  appliedProtocolId.value = protocolId.value.trim();
+  appliedMessageIndex.value = messageIndex.value.trim();
   appliedInclude.value = include.value.trim();
   appliedExclude.value = exclude.value.trim();
   localStorage.setItem("analyzer.order", order.value);
   page.value = 1;
-  browsingHistory.value = false;
-  void loadMessages(false);
-}
-async function jumpToContext(row: Packet) {
-  if (!capture.value) return;
-  search.value = "";
-  protocolId.value = "";
-  messageIndex.value = "";
-  appliedSearch.value = "";
-  appliedInclude.value = "";
-  appliedExclude.value = "";
-  direction.value = "";
-  status.value = "";
-  connection.value = "";
-  selectedRange.value = "";
-  order.value = "asc";
   browsingHistory.value = true;
-  page.value = Math.floor(Math.max(0, row.index) / 100) + 1;
-  jumpTarget.value = row.index;
-  await loadMessages(false);
+  autoFollow.value = false;
+  void loadMessages(false, false, { query: currentQuery(), page: 1 });
+}
+async function jumpToContext(
+  row: Packet,
+  scope: "connection" | "all" = contextScope.value,
+): Promise<void> {
+  if (!capture.value) return;
+  const id = capture.value.id;
+  const shown = displayedQuery.value || currentQuery();
+  const origin: SearchOrigin = {
+    captureId: id,
+    search: search.value,
+    appliedSearch: shown.q,
+    protocolId: protocolId.value,
+    messageIndex: messageIndex.value,
+    appliedProtocolId: shown.protocolId,
+    appliedMessageIndex: shown.messageIndex,
+    include: include.value,
+    exclude: exclude.value,
+    appliedInclude: shown.include,
+    appliedExclude: shown.exclude,
+    direction: shown.direction,
+    status: shown.status,
+    connection: shown.connection,
+    selectedRange: shown.range,
+    hideHeartbeat: shown.hideHeartbeat,
+    order: shown.order,
+    page: displayedPage.value,
+    scrollTop: tableScrollTop(),
+    selectedIndex: row.index,
+    tab: tab.value,
+    viewingTail: viewingTail.value,
+    query: { ...shown },
+  };
+  const query = contextQuery(
+    shown,
+    scope === "connection" ? row.connection : "",
+  );
+  const request = messageGate.begin();
+  queryPublication.cancel();
+  loading.value = true;
+  interactiveLoading.value = true;
+  pendingQuery.value = query;
+  queryError.value = "";
+  browsingHistory.value = true;
+  autoFollow.value = false;
+  retryAction.value = () => jumpToContext(row, scope);
+  const timer = setTimeout(() => {
+    if (request.current()) cancelQuery("上下文定位超时，已保留原结果，可重试");
+  }, 15000);
+  try {
+    const preceding = await api<Page>(
+      `/api/captures/${id}/messages?${contextRankParams(query, row.index)}`,
+      { signal: request.signal },
+    );
+    if (!request.current() || capture.value?.id !== id) return;
+    if (
+      preceding.total === 0 ||
+      row.index < (preceding.capture.firstIndex || 0)
+    ) {
+      queryError.value = "目标消息已被清空或淘汰，原搜索结果已保留";
+      return;
+    }
+    await loadMessages(false, false, {
+      index: row.index,
+      query,
+      page: pageContaining(preceding.total),
+      onCommit: () => {
+        if (!searchOrigin.value) searchOrigin.value = origin;
+        contextAnchor.value = row;
+        contextScope.value = scope;
+        applyQuery(query);
+      },
+    });
+  } catch (error) {
+    if (request.current())
+      queryError.value = `上下文跳转未应用：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    clearTimeout(timer);
+    if (request.current()) {
+      loading.value = false;
+      interactiveLoading.value = false;
+      pendingQuery.value = undefined;
+    }
+  }
+}
+async function returnToSearch(): Promise<void> {
+  const origin = searchOrigin.value;
+  if (!origin || capture.value?.id !== origin.captureId) return;
+  autoFollow.value = false;
+  browsingHistory.value = true;
+  await loadMessages(origin.viewingTail, false, {
+    query: origin.query,
+    page: origin.page,
+    index: origin.selectedIndex,
+    scrollTop: origin.scrollTop,
+    onCommit: () => {
+      applyQuery(origin.query);
+      search.value = origin.search;
+      protocolId.value = origin.protocolId;
+      messageIndex.value = origin.messageIndex;
+      include.value = origin.include;
+      exclude.value = origin.exclude;
+      tab.value = origin.tab;
+      searchOrigin.value = undefined;
+      contextAnchor.value = undefined;
+      jumpTarget.value = undefined;
+    },
+  });
 }
 function changePage(value: number) {
+  if (value === displayedPage.value && !loading.value) return;
+  jumpTarget.value = undefined;
+  locatedRow.value = undefined;
   browsingHistory.value = true;
   page.value = value;
   void loadMessages();
@@ -620,7 +1190,9 @@ function changePage(value: number) {
 function browseHistory() {
   browsingHistory.value = true;
   page.value =
-    order.value === "desc" ? 1 : Math.max(1, Math.ceil(total.value / 100));
+    (displayedQuery.value?.order || order.value) === "desc"
+      ? 1
+      : Math.max(1, Math.ceil(total.value / 100));
   void loadMessages();
 }
 function jumpLatest() {
@@ -633,31 +1205,67 @@ function captureName(item: Capture) {
     ? "实时 · " + (item.connections[0]?.id.slice(0, 8) || item.id.slice(0, 8))
     : item.name;
 }
-function neighbour(delta: number) {
+async function neighbour(delta: number) {
+  if (interactiveLoading.value) return;
   const index = rows.value.findIndex(
     (item) => item.index === selectedRowIndex.value,
   );
-  const row = rows.value[index < 0 ? 0 : index + delta];
-  if (row) void select(row);
+  const next = neighbourPage(
+    displayedPage.value,
+    index,
+    rows.value.length,
+    total.value,
+    delta,
+    100,
+    pageOffset.value,
+  );
+  if (!next) return;
+  browsingHistory.value = true;
+  autoFollow.value = false;
+  if (index + delta >= 0 && index + delta < rows.value.length) {
+    const row = rows.value[index + delta];
+    if (row) {
+      await revealRow(row);
+      return;
+    }
+  }
+  page.value = next.page;
+  await loadMessages(false, false, { position: next.position });
 }
 async function select(row: Packet | undefined) {
   if (!row || !capture.value) return;
+  detailOpen.value = true;
+  detailTarget.value = row;
+  detailError.value = "";
   // 用户开始读某条消息后暂停列表跟随，后台采集继续；“回到最新”再恢复。
   if (capture.value.liveState === "CAPTURING") autoFollow.value = false;
   const id = capture.value.id;
   const key = id + ":" + row.index;
   selectedRowIndex.value = row.index;
+  if (locatedRow.value !== row.index) locatedRow.value = undefined;
   const request = detailGate.begin();
   if (
     selected.value?.index === row.index &&
     selected.value.connection === row.connection
-  )
+  ) {
+    detailLoading.value = false;
     return;
+  }
   const cached = detailCache.get(key);
   if (cached) {
     selected.value = cached;
+    detailLoading.value = false;
     return;
   }
+  selected.value = undefined;
+  detailLoading.value = true;
+  const timer = setTimeout(() => {
+    if (request.current()) {
+      detailGate.cancel();
+      detailLoading.value = false;
+      detailError.value = `消息 #${row.index} 详情等待超时，可重试`;
+    }
+  }, 15000);
   try {
     const detail = await api<Packet>(
       `/api/captures/${id}/messages/${row.index}`,
@@ -673,7 +1281,11 @@ async function select(row: Packet | undefined) {
       }
     }
   } catch (error) {
-    if (request.current()) failure(error);
+    if (request.current())
+      detailError.value = `消息 #${row.index} 加载失败：${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    clearTimeout(timer);
+    if (request.current()) detailLoading.value = false;
   }
 }
 watch(autoFollow, (value) => {
@@ -685,6 +1297,9 @@ watch(autoFollow, (value) => {
     void loadMessages(true);
 });
 onBeforeUnmount(() => {
+  window.removeEventListener("resize", measureWorkspace);
+  window.removeEventListener("keydown", handleWorkspaceKey);
+  regionObserver?.disconnect();
   messageGate.cancel();
   detailGate.cancel();
   if (refreshTimer) clearTimeout(refreshTimer);
@@ -819,6 +1434,11 @@ async function copy() {
   }
 }
 onMounted(async () => {
+  window.addEventListener("resize", measureWorkspace);
+  window.addEventListener("keydown", handleWorkspaceKey);
+  regionObserver = new ResizeObserver(() => measureWorkspace());
+  if (dataRegion.value) regionObserver.observe(dataRegion.value);
+  measureWorkspace();
   try {
     health.value = await api("/api/health");
     settings.value = await api("/api/settings");
@@ -835,7 +1455,7 @@ onMounted(async () => {
 });
 </script>
 <template>
-  <div class="workbench">
+  <div class="workbench" :class="{ 'focus-mode': focusMode }">
     <header class="topbar">
       <div class="brand">
         <span class="brand-icon">⇄</span>
@@ -863,7 +1483,17 @@ onMounted(async () => {
           :selected-index="selectedRowIndex"
         />
         <el-button text @click="openSettings">设置 / 协议加载</el-button>
-        <el-button text @click="checkUpdate">检查更新</el-button>
+        <el-dropdown trigger="click"
+          ><el-button text>更多</el-button
+          ><template #dropdown
+            ><el-dropdown-menu
+              ><el-dropdown-item @click="checkUpdate">检查更新</el-dropdown-item
+              ><el-dropdown-item @click="guideDialog = true"
+                >使用说明</el-dropdown-item
+              ></el-dropdown-menu
+            ></template
+          ></el-dropdown
+        >
         <el-button
           v-if="update.available && update.downloadUrl"
           text
@@ -871,8 +1501,7 @@ onMounted(async () => {
           @click="downloadUpdate"
           >下载 {{ update.latestVersion }}</el-button
         >
-        <el-button text @click="guideDialog = true">使用说明</el-button
-        ><el-switch
+        <el-switch
           v-model="dark"
           inline-prompt
           active-text="深色"
@@ -898,10 +1527,18 @@ onMounted(async () => {
     >
       协议字典尚未加载。点击右上角“设置 / 协议加载”，填写竞品目录并加载。
     </div>
-    <div class="workspace">
-      <aside class="sidebar">
+    <div class="workspace" :class="{ 'sidebar-hidden': !sidebarVisible }">
+      <aside v-show="sidebarVisible" class="sidebar">
         <div class="section-heading">
           抓包记录
+          <el-button
+            text
+            size="small"
+            @click="sidebarCollapsed = true"
+            :disabled="!capture"
+            aria-label="收起记录侧栏"
+            >收起</el-button
+          >
           <el-button text size="small" @click="reloadCaptures().catch(failure)"
             >刷新</el-button
           >
@@ -968,26 +1605,85 @@ onMounted(async () => {
       </aside>
       <main class="main-area">
         <div class="capture-bar">
-          <div>
+          <div class="capture-identity">
+            <el-button
+              size="small"
+              @click="sidebarCollapsed = !sidebarCollapsed"
+              :aria-expanded="sidebarVisible"
+              >{{ sidebarVisible ? "收起记录" : "记录 / 导入" }}</el-button
+            >
             <strong :title="capture?.name">{{
-              capture ? captureName(capture) : "选择或导入一份抓包"
-            }}</strong
-            ><span v-if="capture" class="muted"
-              >缓存 {{ capture.messageCount }} 条 · 解码
-              {{ capture.counts.DECODED || 0 }} · 部分
-              {{ capture.counts.PARTIAL || 0 }} · 失败
-              {{ capture.counts.FAILED || 0 }}</span
+              capture ? captureName(capture) : "选择或导入抓包"
+            }}</strong>
+            <el-popover trigger="hover" :width="300" placement="bottom-start">
+              <template #reference
+                ><span class="capture-count"
+                  >{{ total.toLocaleString() }} /
+                  {{ (capture?.messageCount || 0).toLocaleString() }} 条</span
+                ></template
+              >
+              <p>
+                当前列表匹配 {{ total }} 条，记录保留
+                {{ capture?.messageCount || 0 }} 条。
+              </p>
+              <p>
+                已解码 {{ capture?.counts.DECODED || 0 }} · 部分
+                {{ capture?.counts.PARTIAL || 0 }} · 未映射
+                {{ capture?.counts.UNMAPPED || 0 }} · 失败
+                {{ capture?.counts.FAILED || 0 }}
+              </p>
+              <p v-if="capture?.evictedCount">
+                已淘汰 {{ capture.evictedCount }} 条旧消息，消息序号保留原值。
+              </p>
+            </el-popover>
+            <el-tag
+              v-if="searchOrigin"
+              size="small"
+              :title="selected?.protocolName"
+              >上下文 #{{ locatedRow ?? selectedRowIndex }}</el-tag
             >
-            <span v-if="capture?.evictedCount" class="reading-hint"
-              >已淘汰 {{ capture.evictedCount }} 条旧消息；# 保持原始编号</span
-            >
-            <span v-if="browsingHistory" class="reading-hint"
-              >翻阅历史中 · 新消息不会改变当前位置</span
+            <span
+              v-else-if="capture?.liveState === 'CAPTURING' && browsingHistory"
+              class="reading-hint"
+              title="后台采集继续，新消息不会改变当前位置"
+              >已暂停跟随</span
             >
           </div>
-          <div>
+          <div class="capture-actions">
+            <el-dropdown v-if="searchOrigin && contextAnchor" trigger="click"
+              ><el-button size="small">{{
+                contextScope === "connection"
+                  ? "当前连接上下文"
+                  : "全部连接上下文"
+              }}</el-button
+              ><template #dropdown
+                ><el-dropdown-menu
+                  ><el-dropdown-item
+                    @click="
+                      contextAnchor &&
+                      jumpToContext(contextAnchor, 'connection')
+                    "
+                    >当前连接上下文</el-dropdown-item
+                  ><el-dropdown-item
+                    @click="
+                      contextAnchor && jumpToContext(contextAnchor, 'all')
+                    "
+                    >全部连接上下文</el-dropdown-item
+                  ></el-dropdown-menu
+                ></template
+              ></el-dropdown
+            >
+            <el-button
+              v-if="searchOrigin"
+              size="small"
+              type="primary"
+              plain
+              @click="returnToSearch"
+              >返回搜索结果</el-button
+            >
             <el-button
               v-if="capture?.temporary && capture.liveState !== 'CAPTURING'"
+              size="small"
               type="primary"
               @click="saveCapture"
               >保存记录</el-button
@@ -997,383 +1693,742 @@ onMounted(async () => {
                 capture?.liveState === 'CAPTURING' &&
                 operationStart?.captureId !== capture.id
               "
+              size="small"
               @click="beginOperation"
               >开始标记操作</el-button
             >
             <el-button
               v-if="capture && operationStart?.captureId === capture.id"
+              size="small"
               type="primary"
               @click="endOperation"
               >结束并选取区间</el-button
             >
-            <el-button :disabled="!capture" @click="openMark"
-              >标记操作区间</el-button
-            ><el-button :disabled="!capture" @click="exportCapture"
-              >导出解码 JSON</el-button
+            <el-dropdown trigger="click"
+              ><el-button size="small" :disabled="!capture">记录操作</el-button
+              ><template #dropdown
+                ><el-dropdown-menu
+                  ><el-dropdown-item @click="openMark"
+                    >标记操作区间</el-dropdown-item
+                  ><el-dropdown-item @click="exportCapture"
+                    >导出解码 JSON</el-dropdown-item
+                  ></el-dropdown-menu
+                ></template
+              ></el-dropdown
+            >
+            <el-button
+              size="small"
+              :disabled="!selected"
+              @click="detailOpen = !detailOpen"
+              >{{ detailOpen ? "收起详情" : "展开详情" }}</el-button
+            >
+            <el-button size="small" @click="focusMode = true"
+              >专注列表</el-button
             >
           </div>
         </div>
-        <div
-          class="filters"
-          v-memo="[
-            search,
-            direction,
-            status,
-            connection,
-            hideHeartbeat,
-            order,
-            showAdvancedColumns,
-            capture?.id,
-            capture?.liveState,
-            currentUnread,
-            appliedInclude,
-            appliedExclude,
-            livePanel?.canClearSession,
-            livePanel?.clearing,
-          ]"
-        >
-          <el-input
-            v-model="search"
-            clearable
-            placeholder="搜索协议名、编号、字段或实际值"
-            @keyup.enter="filter"
-            @clear="filter"
-          /><el-input
-            v-model="protocolId"
-            clearable
-            placeholder="协议 ID"
-            @keyup.enter="filter"
-            @clear="filter"
-          /><el-input
-            v-model="messageIndex"
-            clearable
-            placeholder="消息顺序编号"
-            @keyup.enter="filter"
-            @clear="filter"
-          />
-          <span class="filter-break" aria-hidden="true"></span>
-          <el-select
-            v-model="direction"
-            placeholder="全部方向"
-            clearable
-            @change="filter"
-            ><el-option label="发送 CS" value="CS" /><el-option
-              label="接收 SC"
-              value="SC" /></el-select
-          ><el-select
-            v-model="status"
-            placeholder="全部状态"
-            clearable
-            @change="filter"
-            ><el-option
-              v-for="(label, key) in statusText"
-              :key="key"
-              :label="label"
-              :value="key" /></el-select
-          ><el-select
-            v-model="connection"
-            placeholder="全部连接"
-            clearable
-            @change="filter"
-            ><el-option
-              v-for="item in capture?.connections || []"
-              :key="item.id"
-              :value="item.id"
-              :label="item.id + ' · ' + item.endpoint" /></el-select
-          ><el-checkbox v-model="hideHeartbeat" @change="filter"
-            >隐藏心跳</el-checkbox
-          ><el-button type="primary" @click="filter">查询</el-button>
-          <el-button
-            v-if="capture?.liveState === 'CAPTURING'"
-            :type="currentUnread ? 'primary' : 'default'"
-            plain
-            class="jump-latest"
-            @click="jumpLatest"
-            >{{
-              currentUnread ? `${currentUnread} 条新增 · 回到最新` : "回到最新"
-            }}</el-button
-          >
-          <el-select v-model="order" @change="filter" aria-label="消息顺序">
-            <el-option label="最新在前 ↓" value="desc" /><el-option
-              label="最早在前 ↑"
-              value="asc"
+        <div class="workspace-tools">
+          <div class="search-toolbar" role="search" aria-label="协议与消息搜索">
+            <el-input
+              v-model="search"
+              clearable
+              aria-label="搜索协议或字段"
+              placeholder="协议名、字段名或实际值"
+              @keyup.enter="filter"
+              @clear="filter"
             />
-          </el-select>
-          <el-button @click="filterDialog = true"
-            >协议过滤{{
-              appliedInclude || appliedExclude ? " · 已启用" : ""
-            }}</el-button
-          >
-          <el-checkbox v-model="showAdvancedColumns">序号 / 连接</el-checkbox>
-          <el-button
-            class="clear-session"
-            :disabled="!livePanel?.canClearSession"
-            :loading="livePanel?.clearing"
-            title="清空本次采集全部未保存记录的消息，保留记录和连接"
-            @click="livePanel?.clearSession()"
-            >清空会话</el-button
-          >
-        </div>
-        <div v-if="capture?.marks.length" class="marks">
-          <span class="muted">操作区间</span
-          ><el-select
-            v-model="selectedRange"
-            clearable
-            placeholder="全部消息"
-            @change="filter"
-            ><el-option
-              v-for="(item, index) in capture.marks"
-              :key="index"
-              :label="`${item.expired ? '[部分已淘汰] ' : ''}${item.name} [${item.from}–${item.to}]`"
-              :value="String(index + 1)" /></el-select
-          ><span class="muted"
-            >区间用于回看操作，推送因果关系需结合客户端代码确认。</span
-          >
-        </div>
-        <SplitPane
-          direction="vertical"
-          label="调整消息与详情高度"
-          storage-key="analyzer.split"
-          :minimum-primary="160"
-          :minimum-secondary="190"
-          :initial-ratio="0.52"
-        >
-          <template #primary>
-            <section class="message-panel">
-              <el-table
-                class="packet-table"
-                v-loading="interactiveLoading || busy"
-                :data="rows"
-                :fit="true"
-                :current-row-key="selectedRowIndex"
-                height="100%"
-                highlight-current-row
-                empty-text="暂无消息，先导入包含 WebSocket 数据的 SAZ"
-                @row-click="select"
-                row-key="index"
-                size="small"
+            <el-input
+              v-model="protocolId"
+              clearable
+              aria-label="协议 ID"
+              placeholder="协议 ID"
+              @keyup.enter="filter"
+              @clear="filter"
+            />
+            <el-input
+              v-model="messageIndex"
+              clearable
+              aria-label="消息序号"
+              placeholder="消息序号 #"
+              @keyup.enter="filter"
+              @clear="filter"
+            />
+            <el-button
+              type="primary"
+              :loading="interactiveLoading"
+              @click="filter"
+              >查询</el-button
+            >
+          </div>
+          <div class="view-toolbar">
+            <el-popover
+              v-model:visible="advancedFilters"
+              trigger="click"
+              placement="bottom-start"
+              :width="420"
+            >
+              <template #reference
+                ><el-button
+                  :type="advancedFilters ? 'primary' : 'default'"
+                  :aria-expanded="advancedFilters"
+                  >更多筛选</el-button
+                ></template
               >
-                <el-table-column prop="index" label="#" width="64" />
-                <el-table-column label="时间" width="124"
-                  ><template #default="{ row }">{{
-                    time(row.time)
-                  }}</template></el-table-column
+              <div class="advanced-filters filter-popover">
+                <el-select
+                  v-model="direction"
+                  placeholder="全部方向"
+                  aria-label="方向筛选"
+                  clearable
+                  @change="filter"
+                  ><el-option label="发送 CS" value="CS" /><el-option
+                    label="接收 SC"
+                    value="SC"
+                /></el-select>
+                <el-select
+                  v-model="status"
+                  placeholder="全部状态"
+                  aria-label="解码状态筛选"
+                  clearable
+                  @change="filter"
+                  ><el-option
+                    v-for="(label, key) in statusText"
+                    :key="key"
+                    :label="label"
+                    :value="key"
+                /></el-select>
+                <el-select
+                  v-model="connection"
+                  placeholder="全部连接"
+                  aria-label="连接筛选"
+                  clearable
+                  @change="filter"
+                  ><el-option
+                    v-for="item in capture?.connections || []"
+                    :key="item.id"
+                    :value="item.id"
+                    :label="item.id + ' · ' + item.endpoint"
+                /></el-select>
+                <el-checkbox v-model="hideHeartbeat" @change="filter"
+                  >隐藏心跳</el-checkbox
                 >
-                <el-table-column label="方向" width="68"
-                  ><template #default="{ row }"
-                    ><span
-                      class="direction"
-                      :class="row.direction.toLowerCase()"
-                      >{{ row.direction === "CS" ? "↑ CS" : "↓ SC" }}</span
+              </div>
+              <div v-if="capture?.marks.length" class="marks filter-marks">
+                <span class="muted">操作区间</span
+                ><el-select
+                  v-model="selectedRange"
+                  clearable
+                  placeholder="全部消息"
+                  @change="filter"
+                  ><el-option
+                    v-for="(item, index) in capture.marks"
+                    :key="index"
+                    :label="`${item.expired ? '[部分已淘汰] ' : ''}${item.name} [${item.from}–${item.to}]`"
+                    :value="String(index + 1)" /></el-select
+                ><span class="muted">区间不自动证明请求响应关系。</span>
+              </div>
+            </el-popover>
+            <el-select v-model="order" @change="filter" aria-label="消息排序">
+              <el-option label="最新在前 ↓" value="desc" /><el-option
+                label="最早在前 ↑"
+                value="asc"
+              />
+            </el-select>
+            <el-button @click="filterDialog = true">协议过滤</el-button>
+            <el-popover
+              v-model:visible="tableSettings"
+              trigger="click"
+              placement="bottom-end"
+              :width="360"
+            >
+              <template #reference><el-button>表格设置</el-button></template>
+              <div class="column-settings">
+                <strong>显示列</strong>
+                <el-checkbox v-model="columns.time">时间</el-checkbox
+                ><el-checkbox v-model="columns.protocolId">协议 ID</el-checkbox>
+                <el-checkbox v-model="columns.status">解码状态</el-checkbox
+                ><el-checkbox v-model="columns.bytes">字节数</el-checkbox>
+                <el-checkbox v-model="columns.sequence">帧序号</el-checkbox
+                ><el-checkbox v-model="columns.connection">连接</el-checkbox>
+                <el-checkbox v-model="columns.actions">行操作菜单</el-checkbox>
+              </div>
+              <p class="muted">详情布局，自动模式按数据区实际宽高选择</p>
+              <el-radio-group v-model="detailDock" size="small"
+                ><el-radio-button value="auto">自动</el-radio-button
+                ><el-radio-button value="right">右侧</el-radio-button
+                ><el-radio-button value="bottom">底部</el-radio-button
+                ><el-radio-button value="overlay"
+                  >浮层</el-radio-button
+                ></el-radio-group
+              >
+              <p class="muted">
+                空间不足时暂用浮层，保持列表视野；方向键阅读，Esc 收起详情。
+              </p>
+              <el-button size="small" @click="resetLayout"
+                >恢复默认布局</el-button
+              >
+            </el-popover>
+            <el-button
+              v-if="capture?.liveState === 'CAPTURING'"
+              :type="currentUnread ? 'primary' : 'default'"
+              class="jump-latest"
+              @click="jumpLatest"
+              >{{
+                currentUnread
+                  ? `${currentUnread} 条新增 · 回到最新`
+                  : "回到最新"
+              }}</el-button
+            >
+          </div>
+          <div
+            v-if="activeFilters.length"
+            class="active-filters"
+            aria-label="当前生效条件"
+          >
+            <el-tag
+              v-for="item in visibleFilters"
+              disable-transitions
+              :key="item.key + ':' + (item.value || '')"
+              closable
+              :title="item.label"
+              @close="removeFilter(item.key, item.value)"
+              >{{ item.label }}</el-tag
+            >
+
+            <el-button
+              v-if="activeFilters.length > 3"
+              text
+              size="small"
+              :aria-expanded="expandedTags"
+              @click="expandedTags = !expandedTags"
+              >{{
+                expandedTags
+                  ? "收起条件"
+                  : `另有 ${activeFilters.length - 3} 条条件`
+              }}</el-button
+            >
+            <el-button
+              v-if="activeFilters.length"
+              text
+              size="small"
+              @click="resetFilters"
+              >重置全部条件</el-button
+            >
+          </div>
+        </div>
+        <div v-if="focusMode" class="focus-controlbar">
+          <strong>{{ capture ? captureName(capture) : "消息列表" }}</strong>
+          <span class="muted"
+            >{{ total.toLocaleString() }} 条 ·
+            {{
+              selectedRowIndex !== undefined
+                ? `选中消息 #${selectedRowIndex}`
+                : "单击选中，退出专注后查看详情"
+            }}</span
+          >
+          <el-button v-if="searchOrigin" size="small" @click="returnToSearch"
+            >返回搜索结果</el-button
+          >
+          <el-button size="small" type="primary" @click="focusMode = false"
+            >退出专注</el-button
+          >
+        </div>
+        <div ref="dataRegion" class="data-region">
+          <SplitPane
+            ref="splitPane"
+            class="data-split"
+            :direction="detailDirection"
+            :label="
+              detailDirection === 'horizontal'
+                ? '调整列表与详情宽度'
+                : '调整列表与详情高度'
+            "
+            :storage-key="`analyzer.split.${detailDirection}.v3`"
+            :minimum-primary="
+              detailDirection === 'horizontal' ? listWidth : 300
+            "
+            :minimum-secondary="detailDirection === 'horizontal' ? 320 : 180"
+            :initial-ratio="detailDirection === 'horizontal' ? 0.7 : 0.72"
+            :secondary-collapsed="!detailVisible"
+            :secondary-overlay="effectiveLayout === 'overlay'"
+          >
+            <template #primary>
+              <section class="message-panel">
+                <div
+                  v-if="loading || queryError"
+                  class="query-status"
+                  :class="{ 'query-status-error': !!queryError }"
+                  role="status"
+                >
+                  <span
+                    :title="loading ? JSON.stringify(pendingQuery) : queryError"
+                    >{{
+                      loading
+                        ? displayedQuery
+                          ? "正在查询 · 下方保留上次结果"
+                          : "正在载入消息"
+                        : queryError
+                    }}</span
+                  >
+                  <el-button
+                    v-if="loading"
+                    text
+                    size="small"
+                    @click="cancelQuery()"
+                    >取消查询</el-button
+                  >
+                  <template v-else
+                    ><el-button text size="small" @click="retryMessages"
+                      >重试查询</el-button
+                    ><el-button text size="small" @click="queryError = ''"
+                      >关闭提示</el-button
                     ></template
-                  ></el-table-column
-                >
-                <el-table-column
-                  prop="protocolName"
-                  label="协议"
-                  width="300"
-                  show-overflow-tooltip
-                  ><template #default="{ row }"
-                    ><button
-                      class="protocol-name protocol-button"
-                      :title="row.protocolName"
-                      @click.stop="jumpToContext(row)"
-                    >
-                      {{ row.protocolName || "未识别消息" }}
-                    </button></template
-                  ></el-table-column
-                >
-                <el-table-column
-                  prop="preview"
-                  label="消息内容摘要"
-                  min-width="240"
-                  show-overflow-tooltip
-                />
-                <el-table-column label="过滤" width="100"
-                  ><template #default="{ row }">
-                    <el-button link size="small" @click.stop="onlyProtocol(row)"
-                      >仅看</el-button
-                    >
-                    <el-button
-                      link
-                      size="small"
-                      @click.stop="excludeProtocol(row)"
-                      >排除</el-button
-                    >
-                  </template></el-table-column
-                >
-                <el-table-column prop="protocolId" label="编号" width="84" />
-                <el-table-column label="状态" width="92"
-                  ><template #default="{ row }"
-                    ><span
-                      class="decode-state"
-                      :class="row.status.toLowerCase()"
-                      >{{ statusText[row.status] || row.status }}</span
-                    ></template
-                  ></el-table-column
-                >
-                <el-table-column
-                  v-if="showAdvancedColumns"
-                  prop="sequence"
-                  label="序号"
-                  width="76"
-                />
-                <el-table-column label="字节" width="76"
-                  ><template #default="{ row }">{{
-                    row.inputFormat === "DECOMPRESSED_MESSAGE"
-                      ? row.bytes
-                      : row.wireBytes
-                  }}</template></el-table-column
-                >
-                <el-table-column
-                  v-if="showAdvancedColumns"
-                  label="连接"
-                  width="112"
-                  show-overflow-tooltip
-                  ><template #default="{ row }"
-                    ><span :title="row.connection">{{
-                      row.connection.slice(0, 8)
-                    }}</span></template
-                  ></el-table-column
-                >
-              </el-table>
-              <div class="pagination">
-                <span class="muted">{{
-                  viewingTail
-                    ? `最新 ${rows.length} 条 / 匹配 ${total} 条`
-                    : `匹配 ${total} 条 · 时间按本机时区显示`
-                }}</span>
-                <el-button
-                  v-if="viewingTail"
-                  text
-                  size="small"
-                  @click="browseHistory"
-                  >翻阅历史</el-button
-                >
-                <el-pagination
-                  v-else
-                  v-model:current-page="page"
-                  :page-size="100"
-                  :total="total"
-                  layout="total, prev, pager, next"
-                  size="small"
-                  @current-change="changePage"
-                />
-              </div>
-            </section>
-          </template>
-          <template #secondary>
-            <section class="detail-panel">
-              <div class="detail-heading">
-                <b>{{ selected?.protocolName || "消息详情" }}</b
-                ><span v-if="selected?.protocolId" class="muted"
-                  >#{{ selected.protocolId }} · {{ selected.direction }} ·
-                  {{ selected.bytes }} 字节（解压后）</span
-                ><el-button v-if="selected" text size="small" @click="copy"
-                  >复制 JSON</el-button
-                >
-                <el-button
-                  v-if="selected"
-                  text
-                  size="small"
-                  @click="neighbour(-1)"
-                  :disabled="
-                    rows.findIndex((item) => item.index === selectedRowIndex) <=
-                    0
+                  >
+                </div>
+                <el-table
+                  :key="tableRevision"
+                  ref="packetTable"
+                  class="packet-table"
+                  v-loading="busy"
+                  :data="rows"
+                  :fit="true"
+                  :current-row-key="selectedRowIndex"
+                  :row-class-name="
+                    ({ row }: { row: Packet }) =>
+                      row.index === locatedRow ? 'located-row' : ''
                   "
-                  >上一条</el-button
-                >
-                <el-button
-                  v-if="selected"
-                  text
+                  height="100%"
+                  highlight-current-row
+                  empty-text="暂无消息，先导入包含 WebSocket 数据的 SAZ"
+                  @row-click="select"
+                  row-key="index"
                   size="small"
-                  @click="neighbour(1)"
-                  :disabled="
-                    rows.findIndex((item) => item.index === selectedRowIndex) >=
-                    rows.length - 1
-                  "
-                  >下一条</el-button
                 >
-              </div>
-              <div v-if="selected?.error" class="error-bar">
-                {{ selected.error }}
-              </div>
-              <div v-if="selected?.warnings?.length" class="warning-bar">
-                {{ selected.warnings.join("；") }}
-              </div>
-              <el-tabs v-model="tab" class="detail-tabs">
-                <el-tab-pane label="JSON 树" name="tree"
-                  ><div v-if="tab === 'tree'" class="detail-content">
-                    <JsonTree v-if="selected?.body" :value="selected.body" />
-                    <div v-else class="empty-detail">
-                      {{
-                        selected
-                          ? "当前消息未能完整解码，请查看原始包与失败原因。"
-                          : "选中一条消息，查看协议字段与实际值"
-                      }}
-                    </div>
-                  </div></el-tab-pane
-                >
-                <el-tab-pane label="JSON 文本" name="json">
-                  <pre v-if="tab === 'json'" class="detail-content">{{
-                    bodyText
-                  }}</pre>
-                </el-tab-pane>
-                <el-tab-pane label="原始包体" name="hex"
-                  ><div v-if="tab === 'hex'" class="detail-content">
-                    <p class="muted">
-                      解压后的完整业务包（消息头 + Thrift Compact
-                      消息体；头长见元数据 headerBytes）
-                    </p>
-                    <pre>{{ packetHexText }}</pre>
-                    <p class="muted">
-                      {{
-                        selected?.inputFormat === "DECOMPRESSED_MESSAGE"
-                          ? "实时采集器已解压并重组消息，没有提供原始 wire 帧；上方保留的是完整业务包。"
-                          : "SAZ 中的原始 WebSocket 帧（包含帧头、掩码与压缩字节）"
-                      }}
-                    </p>
-                    <pre>{{ wireHexText }}</pre>
-                  </div></el-tab-pane
-                >
-                <el-tab-pane label="字段定义" name="schema"
-                  ><div v-if="tab === 'schema'" class="detail-content">
-                    <p class="muted">
-                      来源：{{ selected?.catalog?.sourceFile
-                      }}<span v-if="selected?.definition?.line"
-                        >:{{ selected.definition.line }}</span
+                  <template #empty
+                    ><div class="table-empty">
+                      <strong>{{
+                        loading
+                          ? "正在查询消息"
+                          : queryError
+                            ? "本次查询未完成"
+                            : !capture
+                              ? "尚未选择抓包记录"
+                              : !capture.messageCount
+                                ? "当前记录没有消息"
+                                : "没有符合当前条件的消息"
+                      }}</strong>
+                      <p>
+                        {{
+                          loading
+                            ? "查询期间可以取消；已有结果会保持可读。"
+                            : !capture
+                              ? "打开“记录 / 导入”选择已有抓包或导入 SAZ。"
+                              : !capture.messageCount
+                                ? "实时记录请确认采集和游戏连接；历史记录请检查导入文件。"
+                                : "检查协议 ID、消息序号、方向、排除条件与心跳设置。"
+                        }}
+                      </p>
+                      <el-button
+                        v-if="queryError"
+                        size="small"
+                        @click="retryMessages"
+                        >重新载入</el-button
                       >
-                      · 字典 SHA256 {{ selected?.catalog?.sha256.slice(0, 16) }}
+                      <el-button
+                        v-if="activeFilters.length"
+                        size="small"
+                        @click="advancedFilters = true"
+                        >检查筛选</el-button
+                      >
+                      <el-button
+                        v-if="activeFilters.length"
+                        type="primary"
+                        size="small"
+                        @click="resetFilters"
+                        >清除全部筛选</el-button
+                      >
+                      <el-button
+                        v-if="!capture"
+                        size="small"
+                        @click="sidebarCollapsed = false"
+                        >打开记录 / 导入</el-button
+                      >
+                    </div></template
+                  >
+                  <el-table-column prop="index" label="消息序号" width="82" />
+                  <el-table-column v-if="columns.time" label="时间" width="108"
+                    ><template #default="{ row }">{{
+                      time(row.time)
+                    }}</template></el-table-column
+                  >
+                  <el-table-column label="方向" width="58"
+                    ><template #default="{ row }"
+                      ><span
+                        class="direction"
+                        :class="row.direction.toLowerCase()"
+                        >{{ row.direction === "CS" ? "↑ CS" : "↓ SC" }}</span
+                      ></template
+                    ></el-table-column
+                  >
+                  <el-table-column
+                    prop="protocolName"
+                    label="协议"
+                    width="230"
+                    show-overflow-tooltip
+                    ><template #default="{ row }"
+                      ><button
+                        class="protocol-name protocol-button"
+                        :title="`${row.protocolName || '未识别消息'} · 点击查看上下文`"
+                        @click.stop="jumpToContext(row)"
+                      >
+                        <HighlightedText
+                          :text="row.protocolName || '未识别消息'"
+                          :query="detailQuery"
+                        /></button></template
+                  ></el-table-column>
+                  <el-table-column
+                    prop="preview"
+                    label="消息内容摘要"
+                    min-width="220"
+                    show-overflow-tooltip
+                    ><template #default="{ row }"
+                      ><HighlightedText
+                        :text="row.preview"
+                        :query="displayedQuery?.q" /></template
+                  ></el-table-column>
+                  <el-table-column
+                    v-if="columns.actions"
+                    label="操作"
+                    width="50"
+                  >
+                    <template #default="{ row }"
+                      ><el-dropdown trigger="click"
+                        ><button
+                          class="row-menu"
+                          :aria-label="`消息 #${row.index} 操作`"
+                          @click.stop
+                        >
+                          ⋯</button
+                        ><template #dropdown
+                          ><el-dropdown-menu>
+                            <el-dropdown-item
+                              @click="jumpToContext(row, 'connection')"
+                              >当前连接上下文</el-dropdown-item
+                            >
+                            <el-dropdown-item @click="jumpToContext(row, 'all')"
+                              >全部连接上下文</el-dropdown-item
+                            >
+                            <el-dropdown-item @click="onlyProtocol(row)"
+                              >仅看此协议</el-dropdown-item
+                            >
+                            <el-dropdown-item @click="excludeProtocol(row)"
+                              >排除此协议</el-dropdown-item
+                            >
+                          </el-dropdown-menu></template
+                        ></el-dropdown
+                      ></template
+                    >
+                  </el-table-column>
+                  <el-table-column
+                    v-if="columns.protocolId"
+                    prop="protocolId"
+                    label="协议 ID"
+                    width="90"
+                  />
+                  <el-table-column v-if="columns.status" label="状态" width="92"
+                    ><template #default="{ row }"
+                      ><span
+                        class="decode-state"
+                        :class="row.status.toLowerCase()"
+                        >{{ statusText[row.status] || row.status }}</span
+                      ></template
+                    ></el-table-column
+                  >
+                  <el-table-column
+                    v-if="columns.sequence"
+                    prop="sequence"
+                    label="帧序号"
+                    width="76"
+                  />
+                  <el-table-column v-if="columns.bytes" label="字节" width="76"
+                    ><template #default="{ row }">{{
+                      row.inputFormat === "DECOMPRESSED_MESSAGE"
+                        ? row.bytes
+                        : row.wireBytes
+                    }}</template></el-table-column
+                  >
+                  <el-table-column
+                    v-if="columns.connection"
+                    label="连接"
+                    width="112"
+                    show-overflow-tooltip
+                    ><template #default="{ row }"
+                      ><span :title="row.connection">{{
+                        row.connection.slice(0, 8)
+                      }}</span></template
+                    ></el-table-column
+                  >
+                </el-table>
+                <div class="pagination">
+                  <span class="muted">{{
+                    viewingTail
+                      ? `最新 ${rows.length} 条 / 匹配 ${total} 条`
+                      : `匹配 ${total} 条 · ${displayedQuery?.order === "desc" ? "最新在前" : "最早在前"} · ${displayedAt || "尚无查询结果"}`
+                  }}</span>
+                  <el-button
+                    v-if="viewingTail"
+                    text
+                    size="small"
+                    @click="browseHistory"
+                    >翻阅历史</el-button
+                  >
+                  <el-pagination
+                    v-else
+                    :current-page="displayedPage"
+                    :page-size="100"
+                    :total="total"
+                    layout="total, prev, pager, next"
+                    size="small"
+                    @update:current-page="changePage"
+                  />
+                </div>
+              </section>
+            </template>
+            <template #secondary>
+              <section class="detail-panel">
+                <div class="detail-heading">
+                  <el-button
+                    text
+                    size="small"
+                    @click="detailOpen = false"
+                    aria-label="收起消息详情"
+                    >收起详情</el-button
+                  >
+                  <b>{{
+                    selected?.protocolName ||
+                    detailTarget?.protocolName ||
+                    "消息详情"
+                  }}</b
+                  ><span v-if="selected" class="muted"
+                    >消息 #{{ selected.index }} · 协议 ID
+                    {{ selected.protocolId ?? "未知" }} ·
+                    {{ selected.direction }} ·
+                    {{ selected.bytes }} 字节（解压后）</span
+                  ><el-button v-if="selected" text size="small" @click="copy"
+                    >复制 JSON</el-button
+                  >
+                  <el-button
+                    v-if="selected"
+                    text
+                    size="small"
+                    @click="neighbour(-1)"
+                    :disabled="!hasPrevious || interactiveLoading"
+                    >上一条</el-button
+                  >
+                  <el-button
+                    v-if="selected"
+                    text
+                    size="small"
+                    @click="neighbour(1)"
+                    :disabled="!hasNext || interactiveLoading"
+                    >下一条</el-button
+                  >
+                  <el-popover
+                    v-if="selected"
+                    trigger="click"
+                    placement="bottom-end"
+                    :width="340"
+                  >
+                    <template #reference
+                      ><el-button text size="small"
+                        >消息对比{{
+                          comparisonBase ? ` · #${comparisonBase.index}` : ""
+                        }}</el-button
+                      ></template
+                    >
+                    <div class="detail-actions detail-popover">
+                      <span class="muted"
+                        >{{
+                          searchOrigin
+                            ? "完整上下文"
+                            : activeFilters.length
+                              ? "当前筛选结果"
+                              : "全部消息"
+                        }}
+                        · 上一条 / 下一条支持跨页</span
+                      >
+                      <el-button size="small" @click="setComparisonBase"
+                        >设为对比基准</el-button
+                      >
+                      <el-button
+                        v-if="comparisonBase"
+                        size="small"
+                        :disabled="
+                          comparisonBase.index === selected.index ||
+                          selectedRowIndex !== selected.index
+                        "
+                        @click="comparisonDialog = true"
+                        >与 #{{ comparisonBase.index }} 对比变化</el-button
+                      >
+                      <el-button
+                        v-if="comparisonBase"
+                        text
+                        size="small"
+                        @click="comparisonBase = undefined"
+                        >清除基准</el-button
+                      >
+                    </div>
+                  </el-popover>
+                  <span v-if="!selected && detailTarget" class="muted"
+                    >目标：消息 #{{ detailTarget.index }} · 协议 ID
+                    {{ detailTarget.protocolId ?? "未知" }}</span
+                  >
+                </div>
+                <div v-if="detailLoading" class="detail-state" role="status">
+                  正在加载消息 #{{ detailTarget?.index }}，旧消息内容已隐藏。
+                </div>
+                <div v-else-if="detailError" class="detail-state" role="alert">
+                  {{ detailError
+                  }}<el-button
+                    size="small"
+                    @click="detailTarget && select(detailTarget)"
+                    >重试详情</el-button
+                  >
+                </div>
+                <template v-if="selected">
+                  <details
+                    v-if="detailQuery && selected"
+                    class="field-matches"
+                    :open="fieldMatches.matches.length > 0"
+                  >
+                    <summary>
+                      搜索“{{ detailQuery }}”：消息体命中
+                      {{ fieldMatches.matches.length }} 个字段{{
+                        fieldMatches.truncated ? "（已达扫描或展示上限）" : ""
+                      }}
+                    </summary>
+                    <div
+                      v-if="fieldMatches.matches.length"
+                      class="field-match-list"
+                    >
+                      <button
+                        v-for="match in fieldMatches.matches"
+                        :key="match.path"
+                        :class="{ active: focusedField === match.path }"
+                        @click="focusField(match.path)"
+                      >
+                        {{ match.path || "/" }} = {{ match.value }}
+                      </button>
+                    </div>
+                    <p v-else class="muted">
+                      已检查的消息体字段中未找到匹配；搜索也可能命中协议名或协议
+                      ID。
                     </p>
-                    <p class="muted">
-                      字段定义格式：[字段名, Thrift 类型]；2 BOOL · 8 I32 · 10
-                      I64 · 11 STRING · [12,结构名] STRUCT · [15,元素类型] LIST
-                      · [13,键类型,值类型] MAP
-                    </p>
-                    <JsonTree
-                      v-if="selected?.schema"
-                      :value="selected.schema"
-                      label="字段号"
-                    /></div
-                ></el-tab-pane>
-                <el-tab-pane label="元数据" name="metadata">
-                  <pre v-if="tab === 'metadata'" class="detail-content">{{
-                    pretty(detailMetadata)
-                  }}</pre>
-                </el-tab-pane>
-              </el-tabs>
-            </section>
-          </template>
-        </SplitPane>
+                  </details>
+                  <div v-if="selected?.error" class="error-bar">
+                    {{ selected.error }}
+                  </div>
+                  <details
+                    v-if="selected?.warnings?.length"
+                    class="warning-bar compact-warning"
+                  >
+                    <summary>
+                      解码提示（{{ selected.warnings.length }}）
+                    </summary>
+                    <div>{{ selected.warnings.join("；") }}</div>
+                  </details>
+                  <el-tabs v-model="tab" class="detail-tabs">
+                    <el-tab-pane label="JSON 树" name="tree"
+                      ><div v-if="tab === 'tree'" class="detail-content">
+                        <JsonTree
+                          v-if="selected?.body !== undefined"
+                          :value="selected.body"
+                          :match-paths="matchPaths"
+                          :focused-path="focusedField"
+                        />
+                        <div v-else class="empty-detail">
+                          {{
+                            selected
+                              ? "当前消息未能完整解码，请查看原始包与失败原因。"
+                              : "选中一条消息，查看协议字段与实际值"
+                          }}
+                        </div>
+                      </div></el-tab-pane
+                    >
+                    <el-tab-pane label="JSON 文本" name="json">
+                      <pre v-if="tab === 'json'" class="detail-content">{{
+                        bodyText
+                      }}</pre>
+                    </el-tab-pane>
+                    <el-tab-pane label="原始包体" name="hex"
+                      ><div v-if="tab === 'hex'" class="detail-content">
+                        <p class="muted">
+                          解压后的完整业务包（消息头 + Thrift Compact
+                          消息体；头长见元数据 headerBytes）
+                        </p>
+                        <pre>{{ packetHexText }}</pre>
+                        <p class="muted">
+                          {{
+                            selected?.inputFormat === "DECOMPRESSED_MESSAGE"
+                              ? "实时采集器已解压并重组消息，没有提供原始 wire 帧；上方保留的是完整业务包。"
+                              : "SAZ 中的原始 WebSocket 帧（包含帧头、掩码与压缩字节）"
+                          }}
+                        </p>
+                        <pre>{{ wireHexText }}</pre>
+                      </div></el-tab-pane
+                    >
+                    <el-tab-pane label="字段定义" name="schema"
+                      ><div v-if="tab === 'schema'" class="detail-content">
+                        <p class="muted">
+                          来源：{{ selected?.catalog?.sourceFile
+                          }}<span v-if="selected?.definition?.line"
+                            >:{{ selected.definition.line }}</span
+                          >
+                          · 字典 SHA256
+                          {{ selected?.catalog?.sha256.slice(0, 16) }}
+                        </p>
+                        <p class="muted">
+                          字段定义格式：[字段名, Thrift 类型]；2 BOOL · 8 I32 ·
+                          10 I64 · 11 STRING · [12,结构名] STRUCT ·
+                          [15,元素类型] LIST · [13,键类型,值类型] MAP
+                        </p>
+                        <JsonTree
+                          v-if="selected?.schema"
+                          :value="selected.schema"
+                          label="字段号"
+                        /></div
+                    ></el-tab-pane>
+                    <el-tab-pane label="元数据" name="metadata">
+                      <pre v-if="tab === 'metadata'" class="detail-content">{{
+                        pretty(detailMetadata)
+                      }}</pre>
+                    </el-tab-pane>
+                  </el-tabs>
+                </template>
+              </section>
+            </template>
+          </SplitPane>
+        </div>
       </main>
     </div>
+    <el-dialog
+      v-model="comparisonDialog"
+      title="消息字段变化对比"
+      width="min(1000px, 95vw)"
+      destroy-on-close
+    >
+      <MessageComparison
+        v-if="comparisonBase && selected"
+        :before="comparisonBase"
+        :after="selected"
+      />
+    </el-dialog>
     <el-dialog
       v-model="markDialog"
       title="标记区间 / 保存 AI 分析快照"
       width="500px"
       ><p class="muted">
-        以列表 #
-        列为边界，保存一次操作前后的消息范围。区间不自动证明请求与推送的因果关系。“保存分析快照”会复制并保存该区间和字典，原连接继续采集；已淘汰的消息无法补回。
+        以列表“消息序号”列为边界，保存一次操作前后的消息范围。区间不自动证明请求与推送的因果关系。“保存分析快照”会复制并保存该区间和字典，原连接继续采集；已淘汰的消息无法补回。
       </p>
       <el-form label-width="90px"
         ><el-form-item label="操作名称"
@@ -1381,7 +2436,7 @@ onMounted(async () => {
             v-model="operation.name"
             maxlength="100"
             placeholder="例如：联盟科技捐献一次" /></el-form-item
-        ><el-form-item label="起始消息 #"
+        ><el-form-item label="起始序号 #"
           ><el-input-number
             v-model="operation.from"
             :min="capture?.firstIndex || 0"
@@ -1389,7 +2444,7 @@ onMounted(async () => {
               capture?.lastIndex ??
               Math.max(0, (capture?.messageCount || 1) - 1)
             " /></el-form-item
-        ><el-form-item label="结束消息 #"
+        ><el-form-item label="结束序号 #"
           ><el-input-number
             v-model="operation.to"
             :min="operation.from"
@@ -1406,7 +2461,8 @@ onMounted(async () => {
     >
     <el-dialog v-model="filterDialog" title="协议过滤" width="540px">
       <p class="muted">
-        名称或编号支持多个条件，用逗号分隔；同组任一匹配，排除优先。与搜索、方向、状态和操作区间同时生效。
+        协议名或协议 ID
+        支持多个条件，用逗号分隔；同组任一匹配，排除优先。与搜索、方向、状态和操作区间同时生效。
       </p>
       <el-form label-width="90px">
         <el-form-item label="仅包含"

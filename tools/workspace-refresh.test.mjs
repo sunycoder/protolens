@@ -39,6 +39,12 @@ test('手动选择 B 后迟到的 A 响应必须失效，旧网络请求被取�
   gate.cancel()
   assert.equal(b.current(), false)
 })
+test('同一条消息切换搜索词后，列表必须更新命中字段摘要', () => {
+  const before = {index:4,connection:'B',time:'fixed',status:'DECODED',protocolId:12,preview:'old=1'}
+  const after = {...before,preview:'/nested/value=hit'}
+  assert.equal(reconcileRows([before],[after])[0].preview,'/nested/value=hit')
+  assert.notEqual(reconcileRows([before],[after])[0],before)
+})
 
 test('跟随当前记录不会产生瞬时未读按钮；暂停、历史页和其他记录仍保留未读提示', () => {
   assert.equal(shouldCountUnread('A', 'A', true, false), false)

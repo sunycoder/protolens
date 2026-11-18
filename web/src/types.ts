@@ -61,6 +61,7 @@ export interface Page {
   items: Packet[];
   total: number;
   capture: Capture;
+  offset?: number;
 }
 export async function api<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);

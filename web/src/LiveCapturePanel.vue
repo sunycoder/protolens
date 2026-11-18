@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { api, post } from "./types";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import SystemProxyControls from "./SystemProxyControls.vue";
 import { changedCaptures, type CaptureProgress } from "./workspaceRefresh";
 
@@ -61,6 +61,77 @@ const collector = ref({
   port: 0,
   certificateFile: "",
 });
+const proxy = ref<{
+  supported: boolean;
+  managed: boolean;
+  existingIsTarget: boolean;
+}>();
+const proxyControls = ref<InstanceType<typeof SystemProxyControls>>();
+const nextStep = computed(() => {
+  if (!subscribed.value)
+    return {
+      title: "页面正在连接后端",
+      hint: "连接恢复后会自动更新；长时间未恢复时请检查后端是否运行。",
+    };
+  if (collector.value.state === "PREPARING")
+    return {
+      title: "正在准备采集器",
+      hint: "首次准备可能需要下载，完成后再开始采集。",
+    };
+  if (collector.value.state === "FAILED")
+    return {
+      title: "采集器未就绪",
+      hint: collector.value.message || "展开技术状态查看原因，修复后刷新诊断。",
+    };
+  if (!state.value.enabled)
+    return {
+      title: "尚未开始采集",
+      hint: "点击“开始采集”，然后进入游戏执行要分析的操作。",
+    };
+  if (
+    proxy.value?.supported &&
+    !proxy.value.managed &&
+    !proxy.value.existingIsTarget
+  )
+    return {
+      title: "采集已开始，等待流量接入",
+      hint: "可点击“接管系统代理”；使用手动代理时请确认流量指向采集端口。",
+    };
+  if (!state.value.source)
+    return {
+      title: "等待游戏连接",
+      hint: "重新进入游戏；已有游戏连接可能需要断开重连。",
+    };
+  return {
+    title: "正在采集",
+    hint: `已收到 ${state.value.receivedFrames} 帧；点击消息可暂停列表跟随，采集继续。`,
+  };
+});
+async function refreshDiagnostics() {
+  try {
+    collector.value = await api("/api/collector");
+    await proxyControls.value?.refresh();
+  } catch (failure) {
+    error.value = String(failure);
+  }
+}
+async function confirmClearSession() {
+  try {
+    await ElMessageBox.confirm(
+      "清空本次采集全部未保存记录的消息？记录和游戏连接会保留，已清空的消息无法恢复。",
+      "清空本次采集",
+      {
+        type: "warning",
+        confirmButtonText: "清空消息",
+        cancelButtonText: "取消",
+      },
+    );
+    await clearSession();
+  } catch (failure) {
+    if (failure !== "cancel" && failure !== "close")
+      error.value = String(failure);
+  }
+}
 function askStop() {
   saveOnStop.value = false;
   recordName.value = "";
@@ -186,9 +257,12 @@ onBeforeUnmount(() => {
   <section class="live-toolbar">
     <div class="live-controls">
       <b>实时采集</b>
-      <el-tag size="small" :type="state.enabled ? 'success' : 'info'">{{
-        !state.enabled ? "未开始" : state.source ? "采集源已接入" : "等待采集源"
-      }}</el-tag>
+      <el-tag
+        size="small"
+        :type="state.enabled && !!state.source ? 'success' : 'info'"
+        :title="nextStep.hint"
+        >{{ nextStep.title }}</el-tag
+      >
       <el-button
         v-if="!state.enabled"
         type="primary"
@@ -200,7 +274,11 @@ onBeforeUnmount(() => {
       <el-button v-else size="small" :loading="busy" @click="askStop"
         >停止采集</el-button
       >
-      <SystemProxyControls />
+      <SystemProxyControls
+        ref="proxyControls"
+        compact
+        @changed="proxy = $event"
+      />
       <el-button text size="small" @click="instructions = true"
         >接入步骤</el-button
       >
@@ -210,35 +288,67 @@ onBeforeUnmount(() => {
         @update:model-value="emit('update:follow', !!$event)"
         >跟随当前记录</el-checkbox
       >
-      <span class="muted" :title="collector.message"
-        >代理 :{{ collector.port }} ·
-        {{
-          collector.state === "RUNNING" ? "已随项目启动" : collector.message
-        }}</span
+      <el-dropdown trigger="click"
+        ><el-button size="small">会话操作</el-button
+        ><template #dropdown
+          ><el-dropdown-menu
+            ><el-dropdown-item
+              :disabled="!canClearSession"
+              @click="confirmClearSession"
+              >清空本次采集消息</el-dropdown-item
+            ></el-dropdown-menu
+          ></template
+        ></el-dropdown
       >
-      <span class="muted"
-        >{{ subscribed ? "页面推送正常" : "页面推送重连中" }} · 收到
-        {{ state.receivedFrames }} 帧 · 去重 {{ state.duplicates }} · 缺号
-        {{ state.missingEvents }}</span
-      >
-    </div>
-    <div v-if="state.connections.length" class="live-controls">
-      <el-select
-        v-model="chosen"
-        placeholder="选择实时游戏连接"
-        @change="selectConnection"
-        ><el-option
-          v-for="item in state.connections"
-          :key="item.captureId"
-          :value="item.captureId"
-          :label="`${item.connection.slice(0, 8)} · ${item.retainedMessages ?? item.messages} 条 · ${item.endpoint}`"
-      /></el-select>
-      <el-button text size="small" @click="selectConnection"
-        >查看此连接</el-button
-      >
-      <span class="muted"
-        >开启后重新进入小游戏；中途接入缺少压缩上下文时需重连游戏。</span
-      >
+      <el-popover trigger="click" placement="bottom-start" :width="420">
+        <template #reference
+          ><el-button size="small" text>连接与诊断</el-button></template
+        >
+        <div class="live-diagnostics">
+          <p class="next-step" role="status">{{ nextStep.hint }}</p>
+          <span class="muted" :title="collector.message"
+            >代理 :{{ collector.port }} ·
+            {{
+              collector.state === "RUNNING" ? "已随项目启动" : collector.message
+            }}</span
+          >
+          <span class="muted"
+            >{{ subscribed ? "页面推送正常" : "页面推送重连中" }} · 收到
+            {{ state.receivedFrames }} 帧 · 去重 {{ state.duplicates }} · 缺号
+            {{ state.missingEvents }}</span
+          >
+          <span class="muted">{{
+            proxy?.managed
+              ? "系统代理已接管"
+              : proxy?.existingIsTarget
+                ? "系统代理已指向采集器"
+                : proxy?.supported
+                  ? "系统代理未接管"
+                  : "请使用手动代理接入"
+          }}</span>
+          <el-button text size="small" @click="refreshDiagnostics"
+            >刷新诊断</el-button
+          >
+          <div v-if="state.connections.length" class="live-controls">
+            <el-select
+              v-model="chosen"
+              placeholder="选择实时游戏连接"
+              @change="selectConnection"
+              ><el-option
+                v-for="item in state.connections"
+                :key="item.captureId"
+                :value="item.captureId"
+                :label="`${item.connection.slice(0, 8)} · ${item.retainedMessages ?? item.messages} 条 · ${item.endpoint}`"
+            /></el-select>
+            <el-button text size="small" @click="selectConnection"
+              >查看此连接</el-button
+            >
+            <span class="muted"
+              >开启后重新进入小游戏；中途接入缺少压缩上下文时需重连游戏。</span
+            >
+          </div>
+        </div>
+      </el-popover>
     </div>
     <div v-if="state.lastError || error" class="error-bar" role="alert">
       {{ error || state.lastError }}
@@ -312,15 +422,15 @@ onBeforeUnmount(() => {
 .live-toolbar {
   background: var(--surface);
   border-bottom: 1px solid var(--border);
-  padding: 8px 16px;
+  padding: 3px 12px;
   flex-shrink: 0;
 }
 .live-controls {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
-  min-height: 32px;
+  min-height: 28px;
 }
 .live-controls + .live-controls {
   margin-top: 6px;
@@ -338,6 +448,22 @@ onBeforeUnmount(() => {
 }
 .live-controls .el-checkbox {
   margin-right: 0;
+}
+.next-step {
+  margin: 4px 0;
+  font-size: 12px;
+  color: var(--text);
+}
+.live-diagnostics {
+  font-size: 12px;
+}
+.live-diagnostics summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.live-diagnostics > span {
+  display: inline-block;
+  margin-right: 12px;
 }
 .live-toolbar > .error-bar {
   margin-top: 6px;

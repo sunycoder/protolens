@@ -6,8 +6,11 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.lashouwan.protolens.enums.MessageOrder;
 
+import java.util.AbstractMap;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
@@ -18,6 +21,12 @@ import java.util.Set;
 public final class CaptureMessageQuery {
     private static final Set<String> OMITTED_FIELDS =
             Set.of("body", "packetHex", "wireHex", "schema", "definition");
+
+    /** 搜索摘要仅处理当前页消息；限制遍历节点、展示字段数和路径长度，避免大包拖慢翻页。 */
+    private static final int SEARCH_PREVIEW_MAX_NODES = 10_000;
+
+    private static final int SEARCH_PREVIEW_MAX_FIELDS = 4;
+    private static final int SEARCH_PREVIEW_MAX_PATH_LENGTH = 1024;
     private final ObjectMapper mapper;
 
     public CaptureMessageQuery(ObjectMapper mapper) {
@@ -109,7 +118,10 @@ public final class CaptureMessageQuery {
                         .append('=')
                         .append(text.substring(0, Math.min(60, text.length())));
             }
-            item.put("preview", preview.toString());
+            // 搜索时优先展示实际命中的嵌套字段；协议名匹配但消息体未命中时保留普通摘要。
+            String matchedPreview =
+                    keyword.isBlank() ? "" : searchPreview(node.path("body"), keyword);
+            item.put("preview", matchedPreview.isBlank() ? preview.toString() : matchedPreview);
             items.add(item);
         }
         ObjectNode result =
@@ -120,6 +132,68 @@ public final class CaptureMessageQuery {
         result.set("items", items);
         result.set("capture", summary);
         return result;
+    }
+
+    /**
+     * 为单条分页结果生成命中字段摘要，不修改消息体，也不下发完整消息。
+     *
+     * <p>使用有界广度遍历查找字段路径或标量值。最多检查一万个节点、展示四个字段； 达到预算时停止，仅用于展示摘要，不能据此否定原搜索结果。路径采用 JSON Pointer 转义。
+     *
+     * @param body 当前消息体
+     * @param keyword 已转小写的非空查询词
+     * @return 命中路径和值；预算内未找到时返回空字符串，由调用方保留默认摘要
+     */
+    private String searchPreview(JsonNode body, String keyword) {
+        Deque<Map.Entry<String, JsonNode>> pending = new ArrayDeque<>();
+        pending.add(new AbstractMap.SimpleImmutableEntry<>("", body));
+        List<String> matches = new ArrayList<>();
+        int visited = 0;
+        while (!pending.isEmpty()
+                && visited < SEARCH_PREVIEW_MAX_NODES
+                && matches.size() < SEARCH_PREVIEW_MAX_FIELDS) {
+            Map.Entry<String, JsonNode> field = pending.removeFirst();
+            visited++;
+            String path = field.getKey();
+            JsonNode value = field.getValue();
+            String text = value.isContainerNode() ? "[" + value.size() + "项]" : value.asText();
+            String lowerText = text.toLowerCase(Locale.ROOT);
+            if (!path.isEmpty()
+                    && (path.toLowerCase(Locale.ROOT).contains(keyword)
+                            || (!value.isContainerNode() && lowerText.contains(keyword)))) {
+                // 长文本保留命中附近内容，而非始终裁剪开头导致搜索词不可见。
+                int start = Math.max(0, lowerText.indexOf(keyword) - 20);
+                matches.add(
+                        path
+                                + "="
+                                + (start > 0 ? "…" : "")
+                                + text.substring(start, Math.min(text.length(), start + 80)));
+            }
+            if (!value.isContainerNode() || path.length() >= SEARCH_PREVIEW_MAX_PATH_LENGTH) {
+                continue;
+            }
+            Iterator<Map.Entry<String, JsonNode>> fields = value.fields();
+            int arrayIndex = 0;
+            Iterator<JsonNode> elements = value.elements();
+            while (value.isArray() ? elements.hasNext() : fields.hasNext()) {
+                // 入队也受同一节点预算约束，不因超大对象或数组先分配无界待处理队列。
+                if (visited + pending.size() >= SEARCH_PREVIEW_MAX_NODES) {
+                    break;
+                }
+                String key;
+                JsonNode child;
+                if (value.isArray()) {
+                    key = Integer.toString(arrayIndex++);
+                    child = elements.next();
+                } else {
+                    Map.Entry<String, JsonNode> entry = fields.next();
+                    key = entry.getKey();
+                    child = entry.getValue();
+                }
+                String childPath = path + "/" + key.replace("~", "~0").replace("/", "~1");
+                pending.addLast(new AbstractMap.SimpleImmutableEntry<>(childPath, child));
+            }
+        }
+        return String.join(" · ", matches);
     }
 
     private boolean matchesProtocol(String protocol, String patterns) {

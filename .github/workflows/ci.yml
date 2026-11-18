@@ -53,6 +53,6 @@ jobs:
         run: gradle compileJava compileTestJava
       - name: 前端构建
         run: gradle webBuild
-      - name: 提取工具测试
+      - name: 协议提取与工作台交互测试
         if: matrix.run_tests
-        run: node --test tools/extract-catalog.test.mjs
+        run: node --experimental-strip-types --test tools/*.test.mjs
