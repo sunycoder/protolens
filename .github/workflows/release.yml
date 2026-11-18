@@ -62,7 +62,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/mitmproxy.tar.gz" -C "$RUNNER_TEMP/protolens-mitm"
           echo "MITMDUMP_PATH=$(find "$RUNNER_TEMP/protolens-mitm" -type f -name mitmdump | head -1)" >> "$GITHUB_ENV"
       - name: 构建安装包和便携包
-        if: matrix.platform != 'macos-arm64'
+        if: matrix.platform != 'macos'
         run: gradle ${{ matrix.tasks }}
       - name: 构建 macOS 便携包
         if: matrix.platform == 'macos'
