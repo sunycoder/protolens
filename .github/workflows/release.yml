@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: protolens-release
+  group: protolens-release-v2
   cancel-in-progress: false
 
 jobs:
