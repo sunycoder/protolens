@@ -20,7 +20,7 @@
 | 系统 | 安装包 | 便携版 |
 | --- | --- | --- |
 | Windows x64 | [下载 ProtoLens-latest.exe](https://github.com/sunycoder/protolens/releases/download/v0.1.3/ProtoLens-latest.exe) | [下载 Windows 便携版](https://github.com/sunycoder/protolens/releases/download/v0.1.3/ProtoLens-0.1.3-windows-x64.zip) |
-| macOS x64 | [下载 macOS 便携包](https://github.com/sunycoder/protolens/releases/download/v0.1.3/ProtoLens-0.1.3-macos-x64.tar.gz) | 同一文件 |
+| macOS arm64 | [下载 macOS 便携包](https://github.com/sunycoder/protolens/releases/download/v0.1.3/ProtoLens-0.1.3-macos-arm64.tar.gz) | 同一文件 |
 | Linux x64 | [下载 Linux 便携包](https://github.com/sunycoder/protolens/releases/download/v0.1.3/ProtoLens-0.1.3-linux-x64.tar.gz) | 同一文件 |
 
 三平台产物由 GitHub Actions 在对应系统运行器原生构建；Windows 提供安装器和 ZIP，macOS/Linux 提供原生 tar.gz 便携包。
