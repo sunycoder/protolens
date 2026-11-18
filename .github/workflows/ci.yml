@@ -48,4 +48,5 @@ jobs:
       - name: 前端构建
         run: gradle webBuild
       - name: 提取工具测试
+        if: matrix.run_tests
         run: node --test tools/extract-catalog.test.mjs
