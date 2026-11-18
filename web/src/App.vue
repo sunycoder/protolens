@@ -45,6 +45,8 @@ const health = ref({
 });
 const search = ref("");
 const protocolId = ref("");
+const messageIndex = ref("");
+const jumpTarget = ref<number>();
 const order = ref(localStorage.getItem("analyzer.order") || "desc");
 const include = ref("");
 const exclude = ref("");
@@ -499,6 +501,7 @@ async function loadMessages(tail = false, background = false) {
   const params = new URLSearchParams({
     q: appliedSearch.value,
     protocolId: protocolId.value.trim(),
+    messageIndex: messageIndex.value.trim(),
     order: order.value,
     include: appliedInclude.value,
     exclude: appliedExclude.value,
@@ -525,6 +528,15 @@ async function loadMessages(tail = false, background = false) {
     rows.value = reconcileRows(rows.value, result.items);
     total.value = result.total;
     capture.value = result.capture;
+    if (jumpTarget.value !== undefined) {
+      const target = result.items.find(
+        (item) => item.index === jumpTarget.value,
+      );
+      if (target) {
+        jumpTarget.value = undefined;
+        void select(target);
+      }
+    }
     // 已淘汰消息仍可暂留详情供阅读，但不冒充仍在当前缓存中。
     viewingTail.value = tail;
     if (
@@ -581,6 +593,24 @@ function filter() {
   page.value = 1;
   browsingHistory.value = false;
   void loadMessages(false);
+}
+async function jumpToContext(row: Packet) {
+  if (!capture.value) return;
+  search.value = "";
+  protocolId.value = "";
+  messageIndex.value = "";
+  appliedSearch.value = "";
+  appliedInclude.value = "";
+  appliedExclude.value = "";
+  direction.value = "";
+  status.value = "";
+  connection.value = "";
+  selectedRange.value = "";
+  order.value = "asc";
+  browsingHistory.value = true;
+  page.value = Math.floor(Math.max(0, row.index) / 100) + 1;
+  jumpTarget.value = row.index;
+  await loadMessages(false);
 }
 function changePage(value: number) {
   browsingHistory.value = true;
@@ -1014,7 +1044,14 @@ onMounted(async () => {
             placeholder="协议 ID"
             @keyup.enter="filter"
             @clear="filter"
+          /><el-input
+            v-model="messageIndex"
+            clearable
+            placeholder="消息顺序编号"
+            @keyup.enter="filter"
+            @clear="filter"
           />
+          <span class="filter-break" aria-hidden="true"></span>
           <el-select
             v-model="direction"
             placeholder="全部方向"
@@ -1140,7 +1177,7 @@ onMounted(async () => {
                     ><button
                       class="protocol-name protocol-button"
                       :title="row.protocolName"
-                      @click.stop="select(row)"
+                      @click.stop="jumpToContext(row)"
                     >
                       {{ row.protocolName || "未识别消息" }}
                     </button></template

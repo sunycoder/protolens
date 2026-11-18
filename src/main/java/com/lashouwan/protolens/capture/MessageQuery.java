@@ -44,6 +44,9 @@ public final class MessageQuery {
     /** 精确协议编号筛选，空值表示不限。 */
     private final String protocolId;
 
+    /** 精确消息顺序编号筛选，空值表示不限。 */
+    private final String messageIndex;
+
     public MessageQuery(
             String query,
             String direction,
@@ -58,7 +61,7 @@ public final class MessageQuery {
             String include,
             String exclude) {
         this(query, direction, status, connection, hideHeartbeat, from, to, offset, limit,
-                order, include, exclude, "");
+                order, include, exclude, "", "");
     }
 
     public MessageQuery(
@@ -75,6 +78,25 @@ public final class MessageQuery {
             String include,
             String exclude,
             String protocolId) {
+        this(query, direction, status, connection, hideHeartbeat, from, to, offset, limit,
+                order, include, exclude, protocolId, "");
+    }
+
+    public MessageQuery(
+            String query,
+            String direction,
+            String status,
+            String connection,
+            boolean hideHeartbeat,
+            int from,
+            int to,
+            int offset,
+            int limit,
+            String order,
+            String include,
+            String exclude,
+            String protocolId,
+            String messageIndex) {
         if (from < 0
                 || to < from
                 || offset < -1
@@ -96,6 +118,7 @@ public final class MessageQuery {
         this.include = include;
         this.exclude = exclude;
         this.protocolId = protocolId;
+        this.messageIndex = messageIndex;
     }
 
     public String query() {
@@ -124,6 +147,10 @@ public final class MessageQuery {
 
     public String protocolId() {
         return protocolId;
+    }
+
+    public String messageIndex() {
+        return messageIndex;
     }
 
     public boolean hideHeartbeat() {

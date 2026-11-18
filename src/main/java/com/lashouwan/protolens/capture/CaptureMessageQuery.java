@@ -38,11 +38,15 @@ public final class CaptureMessageQuery {
         String include = request.include();
         String exclude = request.exclude();
         String protocolId = request.protocolId();
+        String messageIndex = request.messageIndex();
 
         List<JsonNode> matching = new ArrayList<>();
         String keyword = query.toLowerCase(Locale.ROOT);
         for (JsonNode node : capture.path("messages")) {
             int index = node.path("index").asInt();
+            if (!messageIndex.isBlank() && !messageIndex.equals(Integer.toString(index))) {
+                continue;
+            }
             if (index < from
                     || index > to
                     || (!direction.isBlank() && !direction.equals(node.path("direction").asText()))

@@ -135,7 +135,8 @@ public final class CaptureController {
                 context.request().getParam("order", "asc"),
                 context.request().getParam("include", ""),
                 context.request().getParam("exclude", ""),
-                context.request().getParam("protocolId", ""));
+                context.request().getParam("protocolId", ""),
+                context.request().getParam("messageIndex", ""));
     }
 
     private int integer(RoutingContext context, String key, int fallback) {
