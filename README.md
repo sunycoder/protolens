@@ -19,11 +19,10 @@
 
 | 系统 | 安装包 | 便携版 |
 | --- | --- | --- |
-| Windows x64 | Releases 页面中的 `ProtoLens-latest.exe` | Releases 页面中的 `ProtoLens-*-windows-x64.zip` |
-| macOS arm64 | Releases 页面中的 `ProtoLens-latest.dmg` | Releases 页面中的 `ProtoLens-*-macos-*.tar.gz` |
-| Linux x64 | Releases 页面中的 `ProtoLens-latest.deb` 或 `.rpm` | Releases 页面中的 `ProtoLens-*-linux-*.tar.gz` |
+| Windows x64 | [下载 ProtoLens-latest.exe](https://github.com/sunycoder/protolens/releases/download/v0.1.3/ProtoLens-latest.exe) | [下载 Windows 便携版](https://github.com/sunycoder/protolens/releases/download/v0.1.3/ProtoLens-0.1.3-windows-x64.zip) |
+| macOS / Linux | 当前发布流程未提供原生安装包 | 请使用源码并在对应系统本机构建 |
 
-安装包由 GitHub Actions 在对应系统构建；发布页中的文件名会包含平台和架构。
+Windows 安装包由 GitHub Actions 在 Windows x64 运行器构建；采集器当前只提供 Windows x64 原生分发。
 
 **安装版（推荐）**：运行模块下的 `release/ProtoLens-latest.exe`，安装后打开快捷方式。无需安装 Java、Node 或采集器。便携版解压整个 ZIP 后运行 `ProtoLens/ProtoLens.exe`。
 
