@@ -137,9 +137,10 @@ public final class CollectorInstaller {
         return HexFormat.of().formatHex(digest.digest());
     }
 
-    private static void extractExecutable(Path archive, String name, Path target)
+    private void extractExecutable(Path archive, String name, Path target)
             throws IOException {
-        if (!RuntimePlatform.current().os().equals("windows")) {
+        boolean zipArchive = this.archive.getPath().toLowerCase(java.util.Locale.ROOT).endsWith(".zip");
+        if (!zipArchive && !RuntimePlatform.current().os().equals("windows")) {
             extractTarGz(archive, name, target);
             return;
         }
