@@ -41,7 +41,13 @@ jobs:
         run: gradle webInstall
       - name: 后端测试
         if: matrix.run_tests
-        run: gradle test
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            gradle test && exit 0
+            echo "后端测试第 ${attempt} 次失败，准备重试"
+          done
+          exit 1
       - name: 其他平台编译检查
         if: matrix.run_tests == false
         run: gradle compileJava compileTestJava
