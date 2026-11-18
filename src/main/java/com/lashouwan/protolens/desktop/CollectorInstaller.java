@@ -70,8 +70,8 @@ public final class CollectorInstaller {
             if (Files.isRegularFile(executable)) {
                 return executable;
             }
-            Path downloaded = Files.createTempFile(directory, "collector-download-", ".zip");
-            Path extracted = Files.createTempFile(directory, "collector-verified-", ".exe");
+            Path downloaded = Files.createTempFile(directory, "collector-download-", ".archive");
+            Path extracted = Files.createTempDirectory(directory, "collector-verified-");
             try {
                 download(downloaded);
                 if (!sha256.equalsIgnoreCase(digest(downloaded))) {
@@ -79,14 +79,17 @@ public final class CollectorInstaller {
                 }
                 extractExecutable(downloaded, executable.getFileName().toString(), extracted);
                 try {
-                    Files.move(extracted, executable, StandardCopyOption.ATOMIC_MOVE);
+                    Files.move(extracted.resolve(executable.getFileName()), executable, StandardCopyOption.ATOMIC_MOVE);
                 } catch (AtomicMoveNotSupportedException unsupported) {
-                    Files.move(extracted, executable);
+                    Files.move(extracted.resolve(executable.getFileName()), executable);
+                }
+                if (!RuntimePlatform.current().os().equals("windows")) {
+                    executable.toFile().setExecutable(true, false);
                 }
                 return executable;
             } finally {
                 Files.deleteIfExists(downloaded);
-                Files.deleteIfExists(extracted);
+                deleteTree(extracted);
             }
         }
     }
@@ -136,6 +139,10 @@ public final class CollectorInstaller {
 
     private static void extractExecutable(Path archive, String name, Path target)
             throws IOException {
+        if (!RuntimePlatform.current().os().equals("windows")) {
+            extractTarGz(archive, name, target);
+            return;
+        }
         try (ZipInputStream input = new ZipInputStream(Files.newInputStream(archive))) {
             ZipEntry entry;
             while ((entry = input.getNextEntry()) != null) {
@@ -144,7 +151,8 @@ public final class CollectorInstaller {
                 }
                 long total = 0;
                 byte[] buffer = new byte[64 * 1024];
-                try (OutputStream output = Files.newOutputStream(target)) {
+                Path outputFile = target.resolve(name);
+                try (OutputStream output = Files.newOutputStream(outputFile)) {
                     int read;
                     while ((read = input.read(buffer)) != -1) {
                         total += read;
@@ -154,7 +162,7 @@ public final class CollectorInstaller {
                         output.write(buffer, 0, read);
                     }
                 }
-                try (InputStream executable = Files.newInputStream(target)) {
+                try (InputStream executable = Files.newInputStream(outputFile)) {
                     if (executable.read() != 'M' || executable.read() != 'Z') {
                         throw new IOException("归档中的采集器不是 Windows 可执行程序");
                     }
@@ -163,6 +171,48 @@ public final class CollectorInstaller {
             }
         }
         throw new IOException("官方归档缺少采集器：" + name);
+    }
+
+    private static void extractTarGz(Path archive, String name, Path target) throws IOException {
+        Process process = new ProcessBuilder("tar", "-xzf", archive.toString(), "-C", target.toString())
+                .redirectErrorStream(true).start();
+        try {
+            if (process.waitFor(180, TimeUnit.SECONDS) && process.exitValue() == 0) {
+                try (var paths = Files.walk(target)) {
+                    Path executable = paths.filter(Files::isRegularFile)
+                            .filter(path -> path.getFileName().toString().equals(name)).findFirst()
+                            .orElseThrow(() -> new IOException("官方归档缺少采集器：" + name));
+                    Path output = target.resolve(name);
+                    Files.move(executable, output, StandardCopyOption.REPLACE_EXISTING);
+                    validateNativeExecutable(output);
+                    return;
+                }
+            }
+            throw new IOException("解压采集器归档失败");
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IOException("解压采集器归档被中断", interrupted);
+        }
+    }
+
+    private static void validateNativeExecutable(Path file) throws IOException {
+        try (InputStream input = Files.newInputStream(file)) {
+            byte[] magic = input.readNBytes(4);
+            boolean valid = RuntimePlatform.current().os().equals("linux")
+                    ? magic.length >= 4 && magic[0] == 0x7f && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F'
+                    : magic.length >= 4 && ((magic[0] == (byte) 0xcf && magic[1] == (byte) 0xfa && magic[2] == (byte) 0xed && magic[3] == (byte) 0xfe)
+                    || (magic[0] == (byte) 0xfe && magic[1] == (byte) 0xed && magic[2] == (byte) 0xfa && magic[3] == (byte) 0xcf));
+            if (!valid) throw new IOException("归档中的采集器不是当前平台原生可执行程序");
+        }
+    }
+
+    private static void deleteTree(Path root) throws IOException {
+        if (!Files.exists(root)) return;
+        try (var paths = Files.walk(root)) {
+            paths.sorted(java.util.Comparator.reverseOrder()).forEach(path -> {
+                try { Files.deleteIfExists(path); } catch (IOException ignored) { }
+            });
+        }
     }
 
     /** Gradle 打包前与 IDE 启动共用同一准备实现，避免重复维护下载脚本。 */
