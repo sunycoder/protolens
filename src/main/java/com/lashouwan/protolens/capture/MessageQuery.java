@@ -41,6 +41,9 @@ public final class MessageQuery {
     /** 协议排除条件，优先于包含条件。 */
     private final String exclude;
 
+    /** 精确协议编号筛选，空值表示不限。 */
+    private final String protocolId;
+
     public MessageQuery(
             String query,
             String direction,
@@ -54,6 +57,24 @@ public final class MessageQuery {
             String order,
             String include,
             String exclude) {
+        this(query, direction, status, connection, hideHeartbeat, from, to, offset, limit,
+                order, include, exclude, "");
+    }
+
+    public MessageQuery(
+            String query,
+            String direction,
+            String status,
+            String connection,
+            boolean hideHeartbeat,
+            int from,
+            int to,
+            int offset,
+            int limit,
+            String order,
+            String include,
+            String exclude,
+            String protocolId) {
         if (from < 0
                 || to < from
                 || offset < -1
@@ -74,6 +95,7 @@ public final class MessageQuery {
         this.order = MessageOrder.fromCode(order);
         this.include = include;
         this.exclude = exclude;
+        this.protocolId = protocolId;
     }
 
     public String query() {
@@ -98,6 +120,10 @@ public final class MessageQuery {
 
     public String exclude() {
         return exclude;
+    }
+
+    public String protocolId() {
+        return protocolId;
     }
 
     public boolean hideHeartbeat() {

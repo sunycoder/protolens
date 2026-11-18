@@ -44,6 +44,7 @@ const health = ref({
   },
 });
 const search = ref("");
+const protocolId = ref("");
 const order = ref(localStorage.getItem("analyzer.order") || "desc");
 const include = ref("");
 const exclude = ref("");
@@ -497,6 +498,7 @@ async function loadMessages(tail = false, background = false) {
   interactiveLoading.value = !background;
   const params = new URLSearchParams({
     q: appliedSearch.value,
+    protocolId: protocolId.value.trim(),
     order: order.value,
     include: appliedInclude.value,
     exclude: appliedExclude.value,
@@ -578,9 +580,7 @@ function filter() {
   localStorage.setItem("analyzer.order", order.value);
   page.value = 1;
   browsingHistory.value = false;
-  void loadMessages(
-    autoFollow.value && capture.value?.liveState === "CAPTURING",
-  );
+  void loadMessages(false);
 }
 function changePage(value: number) {
   browsingHistory.value = true;
@@ -1008,7 +1008,14 @@ onMounted(async () => {
             placeholder="搜索协议名、编号、字段或实际值"
             @keyup.enter="filter"
             @clear="filter"
-          /><el-select
+          /><el-input
+            v-model="protocolId"
+            clearable
+            placeholder="协议 ID"
+            @keyup.enter="filter"
+            @clear="filter"
+          />
+          <el-select
             v-model="direction"
             placeholder="全部方向"
             clearable

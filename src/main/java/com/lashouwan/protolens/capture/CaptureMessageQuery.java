@@ -37,6 +37,7 @@ public final class CaptureMessageQuery {
         MessageOrder order = request.order();
         String include = request.include();
         String exclude = request.exclude();
+        String protocolId = request.protocolId();
 
         List<JsonNode> matching = new ArrayList<>();
         String keyword = query.toLowerCase(Locale.ROOT);
@@ -52,6 +53,9 @@ public final class CaptureMessageQuery {
             }
             String protocol =
                     node.path("protocolName").asText() + " " + node.path("protocolId").asText();
+            if (!protocolId.isBlank() && !protocolId.equals(node.path("protocolId").asText())) {
+                continue;
+            }
             if (hideHeartbeat && protocol.contains("SynchronizeTime")) {
                 continue;
             }

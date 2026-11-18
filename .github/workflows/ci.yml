@@ -44,7 +44,7 @@ jobs:
         shell: bash
         run: |
           for attempt in 1 2 3; do
-            gradle test && exit 0
+            gradle --no-daemon --max-workers=2 test && exit 0
             echo "后端测试第 ${attempt} 次失败，准备重试"
           done
           exit 1

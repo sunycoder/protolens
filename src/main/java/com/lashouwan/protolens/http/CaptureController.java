@@ -134,7 +134,8 @@ public final class CaptureController {
                         AnalyzerLimits.MAX_PAGE_SIZE),
                 context.request().getParam("order", "asc"),
                 context.request().getParam("include", ""),
-                context.request().getParam("exclude", ""));
+                context.request().getParam("exclude", ""),
+                context.request().getParam("protocolId", ""));
     }
 
     private int integer(RoutingContext context, String key, int fallback) {
