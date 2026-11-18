@@ -21,12 +21,15 @@ jobs:
           - os: windows-latest
             platform: windows-x64
             installer: exe
+            tasks: packageInstaller packagePortable
           - os: macos-latest
             platform: macos-arm64
-            installer: dmg
+            installer: tar.gz
+            tasks: packagePortable
           - os: ubuntu-latest
             platform: linux-x64
-            installer: deb
+            installer: tar.gz
+            tasks: packagePortable
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +46,7 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: 构建安装包和便携包
-        run: gradle packageInstaller packagePortable
+        run: gradle ${{ matrix.tasks }}
       - name: 上传发布产物
         uses: actions/upload-artifact@v4
         with:
