@@ -30,7 +30,7 @@
 **源码版**：准备 JDK 21、Node.js 22.12+ 和 npm，在**仓库根目录**执行：
 
 ```powershell
-.\protolens\start-protolens.cmd
+.\start-protolens.cmd
 ```
 
 安装版和便携版已内置采集器，可直接使用。源码版首次缺少采集器时自动下载固定版本、校验 SHA-256 并缓存，之后复用；无需手动下载、复制文件或安装 Python。首次自动准备需要联网，失败后检查网络并重启工作台即可重试，页面及离线导入仍可使用。
@@ -104,33 +104,33 @@ MCP 提供记录列表、消息搜索、完整字段、前后文、协议定义�
 
 ```powershell
 # 指定其他启动配置（仓库根目录）
-.\gradlew.bat -p protolens run "-PanalyzerConfig=D:/config/analyzer.json"
+.\gradlew.bat run "-PanalyzerConfig=D:/config/analyzer.json"
 ```
 
 IDE 程序参数或发行包 EXE 可使用 `--config <文件绝对路径>`，或用 `--data-dir <目录绝对路径>` 隔离数据。抓包在数据目录的 `captures/`，后端日志为 `logs/analyzer.log`，采集器日志为 `logs/collector.log`，协议提取日志为 `logs/catalog-extract.log`。代理恢复备份位于用户应用目录的 `system-proxy/proxy-lease.json`，异常退出后下次自动启动会核验并恢复；不要手动复制此备份。抓包、本机数据、证书及凭证不加入版本控制。
 
 ## 常用命令
 
-以下命令均在**仓库根目录**执行；只处理 `protolens` 模块。
+以下命令均在**仓库根目录**执行。
 
 | 用途 | 命令 |
 | --- | --- |
-| 启动 | `.\gradlew.bat -p protolens run` |
-| 后端测试 | `.\gradlew.bat -p protolens test` |
-| 构建前端 | `.\gradlew.bat -p protolens webBuild` |
-| 格式化 Java 与前端 | `.\gradlew.bat -p protolens format` |
-| 只检查格式 | `.\gradlew.bat -p protolens checkFormat` |
-| 手动提取协议字典 | `.\gradlew.bat -p protolens extractCatalog "-PcompetitorDir=D:/client/slgProject"` |
-| 打包安装版 | `.\gradlew.bat -p protolens packageInstaller` |
-| 打包便携版 | `.\gradlew.bat -p protolens packagePortable` |
-| 检查分发内容 | `.\gradlew.bat -p protolens verifyDistribution` |
+| 启动 | `.\gradlew.bat run` |
+| 后端测试 | `.\gradlew.bat test` |
+| 构建前端 | `.\gradlew.bat webBuild` |
+| 格式化 Java 与前端 | `.\gradlew.bat format` |
+| 只检查格式 | `.\gradlew.bat checkFormat` |
+| 手动提取协议字典 | `.\gradlew.bat extractCatalog "-PcompetitorDir=D:/client/slgProject"` |
+| 打包安装版 | `.\gradlew.bat packageInstaller` |
+| 打包便携版 | `.\gradlew.bat packagePortable` |
+| 检查分发内容 | `.\gradlew.bat verifyDistribution` |
 
 ### 打包参数与产物
 
 构建需 JDK 21、Node/npm；缺少默认 mitmdump 时会自动准备；Windows 安装器另需 **WiX 3**，便携版无需 WiX。Node 默认从 PATH 查找，mitmdump 默认取 `data/mitmproxy/mitmdump.exe`。工具不在默认位置时：
 
 ```powershell
-.\gradlew.bat -p protolens packageInstaller `
+.\gradlew.bat packageInstaller `
   "-PanalyzerWixDir=C:/Program Files (x86)/WiX Toolset v3.14/bin" `
   "-PanalyzerNodeExecutable=D:/dev/Node/node.exe" `
   "-PanalyzerMitmdumpExecutable=D:/tools/mitmproxy/mitmdump.exe" `
