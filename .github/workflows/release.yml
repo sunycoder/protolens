@@ -45,8 +45,21 @@ jobs:
           node-version: '22.12'
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - name: 准备 macOS 采集器
+        if: matrix.platform == 'macos-arm64'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/protolens-mitm"
+          curl -fsSL https://downloads.mitmproxy.org/12.3.1/mitmproxy-12.3.1-macos-arm64.tar.gz -o "$RUNNER_TEMP/mitmproxy.tar.gz"
+          echo '9b7f7a8e3fd1b1544089c937c579ef1f0f503f0ea598c25bda9eab077c735b93  $RUNNER_TEMP/mitmproxy.tar.gz' | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/mitmproxy.tar.gz" -C "$RUNNER_TEMP/protolens-mitm"
+          echo "MITMDUMP_PATH=$(find "$RUNNER_TEMP/protolens-mitm" -type f -name mitmdump | head -1)" >> "$GITHUB_ENV"
       - name: 构建安装包和便携包
+        if: matrix.platform != 'macos-arm64'
         run: gradle ${{ matrix.tasks }}
+      - name: 构建 macOS 便携包
+        if: matrix.platform == 'macos-arm64'
+        run: gradle ${{ matrix.tasks }} "-PanalyzerMitmdumpExecutable=$MITMDUMP_PATH"
       - name: 上传发布产物
         uses: actions/upload-artifact@v4
         with:
