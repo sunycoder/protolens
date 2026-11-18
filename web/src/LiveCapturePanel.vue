@@ -149,6 +149,7 @@ const error = ref("");
 const instructions = ref(false);
 const chosen = ref("");
 let events: EventSource | undefined;
+let disposed = false;
 let timer: ReturnType<typeof setTimeout> | undefined;
 const pending = new Set<string>();
 watch(
@@ -159,6 +160,7 @@ watch(
   },
 );
 function update(status: LiveStatus) {
+  if (disposed) return;
   if (status.version < state.value.version) return;
   const changes = changedCaptures(state.value.connections, status.connections);
   state.value = status;
@@ -170,7 +172,7 @@ function update(status: LiveStatus) {
     chosen.value = status.connections[0]?.captureId || "";
   changes.forEach((id) => pending.add(id));
   // 心跳不查询列表；合并这一秒实际变化的连接，导航只由用户显式执行。
-  if (pending.size && !timer) {
+  if (pending.size && !timer && document.visibilityState === "visible") {
     timer = setTimeout(() => {
       timer = undefined;
       const changedIds = [...pending];
@@ -226,13 +228,18 @@ defineExpose({ clearSession, canClearSession, clearing });
 function selectConnection() {
   if (chosen.value) emit("open", chosen.value);
 }
-onMounted(async () => {
-  try {
-    update(await api<LiveStatus>("/api/live/status"));
-    collector.value = await api("/api/collector");
-  } catch (failure) {
-    error.value = String(failure);
+function syncEventSubscription() {
+  // 后台采集由服务端负责；隐藏页面不占用长连接或反复更新列表。
+  // 切回页面重新订阅并补读状态，累计消息计数仍由服务端提供。
+  if (disposed || document.visibilityState !== "visible") {
+    events?.close();
+    events = undefined;
+    subscribed.value = false;
+    if (timer) clearTimeout(timer);
+    timer = undefined;
+    return;
   }
+  if (events) return;
   events = new EventSource("/api/live/events");
   events.addEventListener("status", (event) => {
     try {
@@ -247,8 +254,29 @@ onMounted(async () => {
   events.onerror = () => {
     subscribed.value = false;
   };
+}
+async function visibilityChanged() {
+  syncEventSubscription();
+  if (document.visibilityState !== "visible") return;
+  try {
+    update(await api<LiveStatus>("/api/live/status"));
+  } catch (failure) {
+    error.value = failure instanceof Error ? failure.message : String(failure);
+  }
+}
+onMounted(async () => {
+  document.addEventListener("visibilitychange", visibilityChanged);
+  try {
+    update(await api<LiveStatus>("/api/live/status"));
+    collector.value = await api("/api/collector");
+  } catch (failure) {
+    error.value = String(failure);
+  }
+  syncEventSubscription();
 });
 onBeforeUnmount(() => {
+  disposed = true;
+  document.removeEventListener("visibilitychange", visibilityChanged);
   events?.close();
   if (timer) clearTimeout(timer);
 });
@@ -288,17 +316,13 @@ onBeforeUnmount(() => {
         @update:model-value="emit('update:follow', !!$event)"
         >跟随当前记录</el-checkbox
       >
-      <el-dropdown trigger="click"
-        ><el-button size="small">会话操作</el-button
-        ><template #dropdown
-          ><el-dropdown-menu
-            ><el-dropdown-item
-              :disabled="!canClearSession"
-              @click="confirmClearSession"
-              >清空本次采集消息</el-dropdown-item
-            ></el-dropdown-menu
-          ></template
-        ></el-dropdown
+      <el-button
+        size="small"
+        :disabled="!canClearSession"
+        :loading="clearing"
+        title="清空本次采集的未保存消息，保留记录和游戏连接"
+        @click="confirmClearSession"
+        >清空本次采集消息</el-button
       >
       <el-popover trigger="click" placement="bottom-start" :width="420">
         <template #reference
@@ -382,8 +406,7 @@ onBeforeUnmount(() => {
     <el-dialog v-model="instructions" title="实时采集使用步骤" width="660px">
       <ol class="guide">
         <li>
-          启动项目会自动启动采集器。确认代理已就绪后点击“开始采集”，无需单独运行
-          collect-protolens.cmd。
+          启动工作台后，在“连接与诊断”确认采集器已就绪，再点击“开始采集”。无需单独启动采集脚本。
         </li>
         <li>
           首次使用安装
@@ -391,14 +414,27 @@ onBeforeUnmount(() => {
             collector.certificateFile ||
             "数据目录中的 mitmproxy-conf/mitmproxy-ca-cert.cer"
           }}
-          到当前用户的“受信任的根证书颁发机构”。只有这份公开证书需要安装，不能分享同目录内的
+          这份公开 CA 证书：Windows
+          导入当前用户的“受信任的根证书颁发机构”；macOS
+          导入“钥匙串访问”，双击证书，在“信任”中设置信任；Linux
+          使用发行版或客户端的证书管理工具导入。客户端使用独立证书库时，还需在客户端导入。不要分享同目录内的
           CA 私钥文件。
         </li>
         <li>
-          工作台会尝试自动接管系统代理；检测到已有代理时先确认，或点击“保留原代理”。
-          也可用“接管系统代理 / 恢复原代理”手动切换，代理目标为 127.0.0.1:{{
+          <template v-if="proxy?.supported"
+            >Windows 可用“接管系统代理 /
+            恢复原代理”切换；已有代理时先确认，或选择“保留原代理”。</template
+          >
+          <template v-else
+            >当前系统需手动配置代理。macOS：系统设置 → 网络 → 当前网络 →
+            详细信息 →
+            代理，配置网页代理（HTTP）和安全网页代理（HTTPS）；Linux：在桌面网络设置或游戏客户端中配置
+            HTTP / HTTPS 代理。</template
+          >
+          代理地址为 127.0.0.1，端口为
+          {{
             collector.port
-          }}。确认后重开小游戏。
+          }}。完成后完全关闭并重新打开小游戏，确认收到的帧数开始增加。
         </li>
         <li>
           在上方选择游戏连接，搜索 CgAllianceTechDonate
@@ -406,7 +442,8 @@ onBeforeUnmount(() => {
         </li>
         <li>
           取消跟随只暂停页面；消息继续进入有界缓存。停止时自行选择是否保存。
-          已由工作台接管的系统代理会在退出时恢复；外部软件改过设置时保留它的新配置。
+          Windows 已由工作台接管的代理会在退出时恢复；macOS / Linux
+          手动配置的代理需自行恢复，避免工作台退出后仍指向已关闭的端口。
         </li>
       </ol>
       <p class="muted">

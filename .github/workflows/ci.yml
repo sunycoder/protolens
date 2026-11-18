@@ -37,6 +37,14 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: 检查平台选择
         run: gradle checkPackagingPlatforms printPackagingPlatform
+      - name: 检查 Unix 启动入口
+        if: runner.os != 'Windows'
+        shell: sh
+        run: |
+          for script in gradlew start-protolens.sh collect-protolens.sh; do
+            sh -n "$script"
+          done
+          node --experimental-strip-types --test tools/startup-scripts.test.mjs tools/extract-catalog.test.mjs
       - name: 安装前端依赖
         run: gradle webInstall
       - name: 后端测试

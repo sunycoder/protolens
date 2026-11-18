@@ -744,6 +744,57 @@ pre {
   padding: 0;
   opacity: 0;
 }
+.row-exclude {
+  opacity: 0;
+  border: 0;
+  background: transparent;
+  padding: 0 2px;
+  color: var(--primary);
+  font-size: 11px;
+  cursor: pointer;
+}
+.el-table__row:hover .row-exclude,
+.el-table__row.current-row .row-exclude,
+.el-table__row:focus-within .row-exclude,
+.row-exclude:focus-visible {
+  opacity: 1;
+}
+.row-exclude:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+.batch-exclusion-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 6px 10px;
+  background: var(--soft);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.batch-exclusion-bar .el-button {
+  margin-left: 0;
+}
+.batch-protocol-tags {
+  display: flex;
+  flex-wrap: wrap;
+  flex-basis: 100%;
+  gap: 4px;
+  max-height: 60px;
+  overflow: auto;
+}
+.batch-protocol-tags .el-tag {
+  max-width: 280px;
+}
+.batch-protocol-tags .el-tag__content {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.protocol-select {
+  cursor: pointer;
+  accent-color: var(--primary);
+}
 .el-table__row:hover .row-menu,
 .el-table__row.current-row .row-menu,
 .row-menu:focus-visible,
@@ -751,6 +802,9 @@ pre {
   opacity: 1;
 }
 @media (hover: none) {
+  .row-exclude {
+    opacity: 1;
+  }
   .row-menu {
     opacity: 1;
   }
@@ -818,9 +872,37 @@ pre {
 .detail-heading {
   padding: 5px 10px;
   min-height: 34px;
-  gap: 7px;
+  gap: 3px 6px;
 }
-.detail-heading > .el-button:first-child {
+.detail-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+.detail-title-row > b {
+  order: 0;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font:
+    600 13px Consolas,
+    monospace;
+}
+.detail-title-row > .el-button {
+  order: 1;
+  flex-shrink: 0;
+  margin-left: 0;
+}
+.detail-heading > .detail-meta {
+  flex-basis: 100%;
+  font-size: 11px;
+  line-height: 18px;
+}
+.detail-heading > .el-button:first-of-type {
   margin-left: 0;
 }
 .detail-content {

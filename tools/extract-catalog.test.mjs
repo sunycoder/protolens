@@ -38,8 +38,10 @@ test('根目录、任意分包子目录及带引号的文件路径共用发现�
   const result = discoverProtocolFiles(root)
   assert.equal(result.candidates.length, 1)
   assert.equal(result.candidates[0].relativePath, 'script/subpackages/scripts___4/thrift_data.js')
-  assert.equal(discoverProtocolFiles(directory).candidates[0].path, file)
-  assert.equal(discoverProtocolFiles(`"${file}"`).candidates[0].path, file)
+  // macOS 的临时目录可能经 /var → /private/var 链接；发现结果返回真实规范路径。
+  const canonicalFile = fs.realpathSync(file)
+  assert.equal(discoverProtocolFiles(directory).candidates[0].path, canonicalFile)
+  assert.equal(discoverProtocolFiles(`"${file}"`).candidates[0].path, canonicalFile)
   assert.ok(result.candidates[0].sizeBytes > 0)
 })
 

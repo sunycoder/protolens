@@ -16,6 +16,13 @@ import AiAnalysisPanel from "./AiAnalysisPanel.vue";
 import CollectorSettingsPanel from "./CollectorSettingsPanel.vue";
 import MessageComparison from "./MessageComparison.vue";
 import HighlightedText from "./HighlightedText.vue";
+import MessageRowActions from "./MessageRowActions.vue";
+import {
+  protocolChoice,
+  mergeProtocolExclusions,
+  toggleProtocolChoices,
+  type ProtocolChoice,
+} from "./protocolSelection";
 import {
   defaultColumns,
   readColumns,
@@ -44,6 +51,9 @@ import {
 
 const livePanel = ref<InstanceType<typeof LiveCapturePanel>>();
 const packetTable = ref<TableInstance>();
+const rowActions = ref<InstanceType<typeof MessageRowActions>>();
+const batchExcluding = ref(false);
+const selectedProtocols = shallowRef<ProtocolChoice[]>([]);
 const captures = shallowRef<Capture[]>([]);
 const capture = shallowRef<Capture>();
 const selected = shallowRef<Packet>();
@@ -87,7 +97,9 @@ const detailDock = ref<DetailLayout>(
     ? (savedDock as DetailLayout)
     : "auto",
 );
-const listWidth = computed(() => listMinimumWidth(columns.value));
+const listWidth = computed(
+  () => listMinimumWidth(columns.value) + (batchExcluding.value ? 36 : 0),
+);
 const effectiveLayout = computed(() =>
   chooseDetailLayout(
     regionSize.value.width,
@@ -166,7 +178,6 @@ const update = ref({
   available: false,
   releaseUrl: "",
 });
-const updateBusy = ref(false);
 const settings = ref({
   serverPort: 0,
   frontendPort: 0,
@@ -241,25 +252,6 @@ async function checkUpdate() {
     else ElMessage.info("当前已是最新版本");
   } catch (error) {
     failure(error);
-  }
-}
-async function downloadUpdate() {
-  if (!update.value.downloadUrl) return;
-  updateBusy.value = true;
-  try {
-    const response = await fetch(update.value.downloadUrl);
-    if (!response.ok) throw new Error(`下载失败：HTTP ${response.status}`);
-    const blob = await response.blob();
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = update.value.fileName || "ProtoLens-update";
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-    ElMessage.success("安装包已开始下载");
-  } catch (error) {
-    failure(error);
-  } finally {
-    updateBusy.value = false;
   }
 }
 async function saveSettings() {
@@ -392,9 +384,10 @@ function onlyProtocol(row: Packet) {
   filter();
 }
 function excludeProtocol(row: Packet) {
-  exclude.value = [exclude.value, row.protocolId || row.protocolName]
-    .filter(Boolean)
-    .join(",");
+  const choice = protocolChoice(row);
+  if (!choice) return;
+  pauseListForInteraction();
+  exclude.value = mergeProtocolExclusions(exclude.value, [choice]);
   filter();
 }
 const direction = ref("");
@@ -470,7 +463,7 @@ async function freezeOperation() {
     busy.value = false;
   }
 }
-const guideDialog = ref(false);
+const importGuideDialog = ref(false);
 const errorText = ref("");
 const messageGate = new RequestGate();
 const detailGate = new RequestGate();
@@ -481,6 +474,73 @@ const viewingTail = ref(false);
 const unread = shallowRef<Record<string, number>>({});
 const appliedSearch = ref("");
 const selectedRowIndex = ref<number>();
+function pauseListForInteraction() {
+  autoFollow.value = false;
+  pendingLive = false;
+  if (refreshTimer) clearTimeout(refreshTimer);
+  // 不只禁止下次刷新：在菜单打开之前已经发出的请求也不能替换当前行。
+  if (loading.value) cancelQuery("");
+}
+function toggleBatchMode() {
+  if (batchExcluding.value) {
+    batchExcluding.value = false;
+    selectedProtocols.value = [];
+    return;
+  }
+  pauseListForInteraction();
+  rowActions.value?.close();
+  batchExcluding.value = true;
+}
+function toggleProtocolSelection(row: Packet) {
+  pauseListForInteraction();
+  selectedProtocols.value = toggleProtocolChoices(selectedProtocols.value, row);
+}
+function excludeSelectedProtocols() {
+  if (!selectedProtocols.value.length) return;
+  exclude.value = mergeProtocolExclusions(
+    exclude.value,
+    selectedProtocols.value,
+  );
+  filter();
+}
+// 只有查询成功发布后才清理已排除的选择；失败时仍可查看选择并重试。
+watch(displayedQuery, (query) => {
+  if (!query || !selectedProtocols.value.length) return;
+  const excluded = new Set(query.exclude.split(/[,，\s]+/).filter(Boolean));
+  selectedProtocols.value = selectedProtocols.value.filter(
+    (item) => !excluded.has(item.token),
+  );
+});
+watch(
+  () => `${capture.value?.id}:${capture.value?.clearVersion || 0}`,
+  () => {
+    batchExcluding.value = false;
+    selectedProtocols.value = [];
+  },
+);
+// 点选详情和实时未读计数不改变列表内容；避免因此重跑整页单元格和操作菜单。
+const tableRenderDeps = computed(() => [
+  tableRevision.value,
+  batchExcluding.value,
+  selectedProtocols.value,
+  rows.value,
+  locatedRow.value,
+  busy.value,
+  loading.value,
+  queryError.value,
+  capture.value?.id,
+  capture.value?.messageCount,
+  activeFilters.value.length,
+  detailQuery.value,
+  displayedQuery.value?.q,
+  ...Object.values(columns.value),
+]);
+watch([selectedRowIndex, rows], async () => {
+  await nextTick();
+  packetTable.value?.setCurrentRow(
+    rows.value.find((item) => item.index === selectedRowIndex.value),
+  );
+});
 const contextScope = ref<"connection" | "all">("connection");
 const contextAnchor = shallowRef<Packet>();
 interface SearchOrigin {
@@ -1107,6 +1167,19 @@ async function jumpToContext(
     shown,
     scope === "connection" ? row.connection : "",
   );
+  // 已经处于同一上下文页时直接定位，避免再次查排名、重载列表和丢失滚动位置。
+  if (
+    Object.entries(query).every(
+      ([key, value]) => shown[key as keyof WorkspaceQuery] === value,
+    ) &&
+    rows.value.some((item) => item.index === row.index)
+  ) {
+    if (loading.value) cancelQuery("");
+    contextAnchor.value = row;
+    contextScope.value = scope;
+    await revealRow(row);
+    return;
+  }
   const request = messageGate.begin();
   queryPublication.cancel();
   loading.value = true;
@@ -1196,6 +1269,9 @@ function browseHistory() {
   void loadMessages();
 }
 function jumpLatest() {
+  rowActions.value?.close();
+  batchExcluding.value = false;
+  selectedProtocols.value = [];
   browsingHistory.value = false;
   if (!autoFollow.value) autoFollow.value = true;
   else void loadMessages(true);
@@ -1232,9 +1308,28 @@ async function neighbour(delta: number) {
   page.value = next.page;
   await loadMessages(false, false, { position: next.position });
 }
+const navigatingSearchResult = computed(
+  () =>
+    !!(
+      displayedQuery.value?.q ||
+      displayedQuery.value?.protocolId ||
+      displayedQuery.value?.messageIndex
+    ),
+);
+function openProtocol(row: Packet) {
+  // 搜索命中仍可一键跳转上下文；日常浏览直接读详情，不额外查询整页。
+  if (navigatingSearchResult.value) void jumpToContext(row);
+  else void select(row);
+}
 async function select(row: Packet | undefined) {
   if (!row || !capture.value) return;
   detailOpen.value = true;
+  if (
+    detailLoading.value &&
+    detailTarget.value?.index === row.index &&
+    detailTarget.value.connection === row.connection
+  )
+    return;
   detailTarget.value = row;
   detailError.value = "";
   // 用户开始读某条消息后暂停列表跟随，后台采集继续；“回到最新”再恢复。
@@ -1289,6 +1384,11 @@ async function select(row: Packet | undefined) {
   }
 }
 watch(autoFollow, (value) => {
+  if (value) {
+    rowActions.value?.close();
+    batchExcluding.value = false;
+    selectedProtocols.value = [];
+  }
   if (
     value &&
     !browsingHistory.value &&
@@ -1488,18 +1588,31 @@ onMounted(async () => {
           ><template #dropdown
             ><el-dropdown-menu
               ><el-dropdown-item @click="checkUpdate">检查更新</el-dropdown-item
-              ><el-dropdown-item @click="guideDialog = true"
-                >使用说明</el-dropdown-item
+              ><el-dropdown-item @click="importGuideDialog = true"
+                >SAZ 导入说明</el-dropdown-item
               ></el-dropdown-menu
             ></template
           ></el-dropdown
         >
+        <!-- 安装包交给浏览器原生下载；fetch 会被同源 CSP 拦截，并额外受跨域读取限制。 -->
         <el-button
           v-if="update.available && update.downloadUrl"
+          tag="a"
           text
-          :loading="updateBusy"
-          @click="downloadUpdate"
+          :href="update.downloadUrl"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="由浏览器下载；进度请查看浏览器下载列表，失败时可打开发版页面"
           >下载 {{ update.latestVersion }}</el-button
+        >
+        <el-button
+          v-if="update.available && update.releaseUrl"
+          tag="a"
+          text
+          :href="update.releaseUrl"
+          target="_blank"
+          rel="noopener noreferrer"
+          >发版页面</el-button
         >
         <el-switch
           v-model="dark"
@@ -1835,6 +1948,13 @@ onMounted(async () => {
               />
             </el-select>
             <el-button @click="filterDialog = true">协议过滤</el-button>
+            <el-button
+              :type="batchExcluding ? 'primary' : 'default'"
+              :disabled="!capture"
+              @click="toggleBatchMode"
+            >
+              {{ batchExcluding ? "退出批量排除" : "批量排除" }}
+            </el-button>
             <el-popover
               v-model:visible="tableSettings"
               trigger="click"
@@ -1850,7 +1970,7 @@ onMounted(async () => {
                 ><el-checkbox v-model="columns.bytes">字节数</el-checkbox>
                 <el-checkbox v-model="columns.sequence">帧序号</el-checkbox
                 ><el-checkbox v-model="columns.connection">连接</el-checkbox>
-                <el-checkbox v-model="columns.actions">行操作菜单</el-checkbox>
+                <el-checkbox v-model="columns.actions">行操作</el-checkbox>
               </div>
               <p class="muted">详情布局，自动模式按数据区实际宽高选择</p>
               <el-radio-group v-model="detailDock" size="small"
@@ -1916,6 +2036,52 @@ onMounted(async () => {
             >
           </div>
         </div>
+        <div
+          v-if="batchExcluding"
+          class="batch-exclusion-bar"
+          role="region"
+          aria-label="批量排除协议"
+        >
+          <span
+            >已选 <b>{{ selectedProtocols.length }}</b> 种协议</span
+          >
+          <span class="muted"
+            >同协议多条消息只选一次；列表已暂停跟随，后台继续采集。</span
+          >
+          <el-button
+            size="small"
+            type="primary"
+            :disabled="!selectedProtocols.length || interactiveLoading"
+            :loading="interactiveLoading"
+            @click="excludeSelectedProtocols"
+            >排除所选协议</el-button
+          >
+          <el-button
+            size="small"
+            :disabled="!selectedProtocols.length"
+            @click="selectedProtocols = []"
+            >清空选择</el-button
+          >
+          <el-button size="small" text @click="toggleBatchMode">完成</el-button>
+          <div
+            v-if="selectedProtocols.length"
+            class="batch-protocol-tags"
+            aria-label="已选协议"
+          >
+            <el-tag
+              v-for="choice in selectedProtocols"
+              :key="choice.key"
+              closable
+              :title="choice.label"
+              @close="
+                selectedProtocols = selectedProtocols.filter(
+                  (item) => item.key !== choice.key,
+                )
+              "
+              >{{ choice.label }}</el-tag
+            >
+          </div>
+        </div>
         <div v-if="focusMode" class="focus-controlbar">
           <strong>{{ capture ? captureName(capture) : "消息列表" }}</strong>
           <span class="muted"
@@ -1953,7 +2119,7 @@ onMounted(async () => {
             :secondary-overlay="effectiveLayout === 'overlay'"
           >
             <template #primary>
-              <section class="message-panel">
+              <section :key="tableRevision" class="message-panel">
                 <div
                   v-if="loading || queryError"
                   class="query-status"
@@ -1986,13 +2152,12 @@ onMounted(async () => {
                   >
                 </div>
                 <el-table
-                  :key="tableRevision"
+                  v-memo="tableRenderDeps"
                   ref="packetTable"
                   class="packet-table"
                   v-loading="busy"
                   :data="rows"
                   :fit="true"
-                  :current-row-key="selectedRowIndex"
                   :row-class-name="
                     ({ row }: { row: Packet }) =>
                       row.index === locatedRow ? 'located-row' : ''
@@ -2055,6 +2220,23 @@ onMounted(async () => {
                       >
                     </div></template
                   >
+                  <el-table-column v-if="batchExcluding" width="36" label="">
+                    <template #default="{ row }">
+                      <input
+                        type="checkbox"
+                        class="protocol-select"
+                        :aria-label="`选择协议 ${row.protocolName || (row.protocolId ?? '未知')}`"
+                        :disabled="!protocolChoice(row)"
+                        :checked="
+                          selectedProtocols.some(
+                            (item) => item.key === protocolChoice(row)?.key,
+                          )
+                        "
+                        @click.stop
+                        @change="toggleProtocolSelection(row)"
+                      />
+                    </template>
+                  </el-table-column>
                   <el-table-column prop="index" label="消息序号" width="82" />
                   <el-table-column v-if="columns.time" label="时间" width="108"
                     ><template #default="{ row }">{{
@@ -2078,8 +2260,8 @@ onMounted(async () => {
                     ><template #default="{ row }"
                       ><button
                         class="protocol-name protocol-button"
-                        :title="`${row.protocolName || '未识别消息'} · 点击查看上下文`"
-                        @click.stop="jumpToContext(row)"
+                        :title="`${row.protocolName || '未识别消息'} · ${navigatingSearchResult ? '定位上下文并查看详情' : '查看详情'}`"
+                        @click.stop="openProtocol(row)"
                       >
                         <HighlightedText
                           :text="row.protocolName || '未识别消息'"
@@ -2099,35 +2281,28 @@ onMounted(async () => {
                   <el-table-column
                     v-if="columns.actions"
                     label="操作"
-                    width="50"
+                    width="86"
                   >
-                    <template #default="{ row }"
-                      ><el-dropdown trigger="click"
-                        ><button
-                          class="row-menu"
-                          :aria-label="`消息 #${row.index} 操作`"
-                          @click.stop
-                        >
-                          ⋯</button
-                        ><template #dropdown
-                          ><el-dropdown-menu>
-                            <el-dropdown-item
-                              @click="jumpToContext(row, 'connection')"
-                              >当前连接上下文</el-dropdown-item
-                            >
-                            <el-dropdown-item @click="jumpToContext(row, 'all')"
-                              >全部连接上下文</el-dropdown-item
-                            >
-                            <el-dropdown-item @click="onlyProtocol(row)"
-                              >仅看此协议</el-dropdown-item
-                            >
-                            <el-dropdown-item @click="excludeProtocol(row)"
-                              >排除此协议</el-dropdown-item
-                            >
-                          </el-dropdown-menu></template
-                        ></el-dropdown
-                      ></template
-                    >
+                    <template #default="{ row }">
+                      <button
+                        class="row-exclude"
+                        :aria-label="`排除协议 ${row.protocolName || (row.protocolId ?? '未知')}`"
+                        :disabled="!protocolChoice(row)"
+                        title="排除此协议的全部消息"
+                        @click.stop="excludeProtocol(row)"
+                      >
+                        排除
+                      </button>
+                      <button
+                        class="row-menu"
+                        :aria-label="`消息 #${row.index} 操作`"
+                        aria-haspopup="dialog"
+                        @pointerdown.stop="pauseListForInteraction"
+                        @click.stop="rowActions?.open($event, row)"
+                      >
+                        ⋯
+                      </button>
+                    </template>
                   </el-table-column>
                   <el-table-column
                     v-if="columns.protocolId"
@@ -2169,6 +2344,15 @@ onMounted(async () => {
                     ></el-table-column
                   >
                 </el-table>
+                <MessageRowActions
+                  ref="rowActions"
+                  :rows="rows"
+                  :capture-id="capture?.id"
+                  @opening="pauseListForInteraction"
+                  @context="jumpToContext"
+                  @only="onlyProtocol"
+                  @exclude="excludeProtocol"
+                />
                 <div class="pagination">
                   <span class="muted">{{
                     viewingTail
@@ -2197,19 +2381,26 @@ onMounted(async () => {
             <template #secondary>
               <section class="detail-panel">
                 <div class="detail-heading">
-                  <el-button
-                    text
-                    size="small"
-                    @click="detailOpen = false"
-                    aria-label="收起消息详情"
-                    >收起详情</el-button
-                  >
-                  <b>{{
-                    selected?.protocolName ||
-                    detailTarget?.protocolName ||
-                    "消息详情"
-                  }}</b
-                  ><span v-if="selected" class="muted"
+                  <div class="detail-title-row">
+                    <el-button
+                      text
+                      size="small"
+                      @click="detailOpen = false"
+                      aria-label="收起消息详情"
+                      >收起详情</el-button
+                    >
+                    <b
+                      :title="
+                        selected?.protocolName || detailTarget?.protocolName
+                      "
+                      >{{
+                        selected?.protocolName ||
+                        detailTarget?.protocolName ||
+                        "消息详情"
+                      }}</b
+                    >
+                  </div>
+                  <span v-if="selected" class="muted detail-meta"
                     >消息 #{{ selected.index }} · 协议 ID
                     {{ selected.protocolId ?? "未知" }} ·
                     {{ selected.direction }} ·
@@ -2279,7 +2470,9 @@ onMounted(async () => {
                       >
                     </div>
                   </el-popover>
-                  <span v-if="!selected && detailTarget" class="muted"
+                  <span
+                    v-if="!selected && detailTarget"
+                    class="muted detail-meta"
                     >目标：消息 #{{ detailTarget.index }} · 协议 ID
                     {{ detailTarget.protocolId ?? "未知" }}</span
                   >
@@ -2342,6 +2535,7 @@ onMounted(async () => {
                       ><div v-if="tab === 'tree'" class="detail-content">
                         <JsonTree
                           v-if="selected?.body !== undefined"
+                          :key="selected.index"
                           :value="selected.body"
                           :match-paths="matchPaths"
                           :focused-path="focusedField"
@@ -2611,31 +2805,33 @@ onMounted(async () => {
         ></template
       >
     </el-dialog>
-    <el-dialog v-model="guideDialog" title="从抓包到可读协议" width="650px"
-      ><ol class="guide">
+    <el-dialog
+      v-model="importGuideDialog"
+      title="SAZ 导入说明"
+      width="min(600px, 94vw)"
+    >
+      <p class="muted">
+        用于分析已有抓包文件。实时采集请使用顶部的“接入步骤”。
+      </p>
+      <ol class="guide">
         <li>
-          先在 Fiddler 开启 System Proxy，再启动小游戏，保留主游戏 WebSocket
-          从握手开始的全部消息。
+          准备 .saz 文件，需包含从握手开始的完整主游戏 WebSocket
+          会话。已有文件可直接导入，无需为导入开启系统代理。
+        </li>
+        <li>在“设置 / 协议加载”中加载与抓包版本匹配的客户端协议字典。</li>
+        <li>
+          打开“记录 / 导入”，点击“选择 SAZ
+          文件”；也可填写当前运行工作台的这台电脑上的文件绝对路径，再点击“从路径导入”。
         </li>
         <li>
-          选中主游戏连接，导出 SAZ；在左侧选择文件或填写本机路径批量导入。
-        </li>
-        <li>
-          在协议搜索输入 Donate 或 2364，查看科技捐献。CS 是客户端发送，SC
-          是服务端下发。
-        </li>
-        <li>
-          选中消息查看 JSON 树、完整字节及字段字典；I64 使用字符串保留精度，Map
-          用 $map 条目数组保存原始键。
-        </li>
-        <li>
-          标记一段操作区间，便于回看请求、响应和交错推送。当前工具不会自动认定相邻消息的因果关系。
+          导入完成后选择该记录，按协议名、协议 ID
+          或消息序号查找，查看消息字段与原始包体。
         </li>
       </ol>
       <p class="muted">
-        支持离线 SAZ 导入和独立 mitmproxy
-        实时采集，详见顶部工具栏。工具不会向游戏服务器发送或重放请求。客户端更新后重新提取字典，再重启服务并重新导入；旧记录保留当时的字典指纹。
-      </p></el-dialog
-    >
+        Windows、macOS、Linux
+        均使用同一导入入口。旧记录保留导入时的字典；要使用新字典重新解析，请重新导入原文件。
+      </p>
+    </el-dialog>
   </div>
 </template>

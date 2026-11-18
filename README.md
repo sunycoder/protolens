@@ -12,27 +12,33 @@
 - **AI 分析**：内置只读 MCP，供 AI 查询抓包、字段定义及客户端源码，追踪请求、推送与页面刷新流程。
 - **桌面运行**：安装版内置运行环境，支持自动打开页面、托盘退出、单实例唤起及覆盖升级保留数据；Windows 系统代理支持自动接管与恢复。
 
-## 快速启动
-
-## 下载
+## 下载与启动
 
 从 [GitHub Releases](https://github.com/sunycoder/protolens/releases) 下载已发布版本；构建过程见 [GitHub Actions](https://github.com/sunycoder/protolens/actions/workflows/release.yml)：
 
 | 系统 | 安装包 | 便携版 |
 | --- | --- | --- |
-| Windows x64 | [下载 ProtoLens-latest.exe](https://github.com/sunycoder/protolens/releases/download/v0.1.4/ProtoLens-latest.exe) | [下载 Windows ZIP](https://github.com/sunycoder/protolens/releases/download/v0.1.4/ProtoLens-0.1.4-windows-x64.zip) |
-| macOS | [下载 macOS tar.gz](https://github.com/sunycoder/protolens/releases/download/v0.1.4/ProtoLens-0.1.4-macos.tar.gz) | 同一文件 |
-| Linux x64 | [下载 Linux tar.gz](https://github.com/sunycoder/protolens/releases/download/v0.1.4/ProtoLens-0.1.4-linux-x64.tar.gz) | 同一文件 |
+| Windows x64 | [下载 ProtoLens-latest.exe](https://github.com/sunycoder/protolens/releases/download/v0.1.5/ProtoLens-latest.exe) | [下载 Windows ZIP](https://github.com/sunycoder/protolens/releases/download/v0.1.5/ProtoLens-0.1.5-windows-x64.zip) |
+| macOS | [下载 macOS tar.gz](https://github.com/sunycoder/protolens/releases/download/v0.1.5/ProtoLens-0.1.5-macos.tar.gz) | 同一文件 |
+| Linux x64 | [下载 Linux tar.gz](https://github.com/sunycoder/protolens/releases/download/v0.1.5/ProtoLens-0.1.5-linux-x64.tar.gz) | 同一文件 |
 
-当前发布版本：`v0.1.4`。
+当前发布版本：`v0.1.5`。
 
-**安装版（推荐）**：运行模块下的 `release/ProtoLens-latest.exe`，安装后打开快捷方式。无需安装 Java、Node 或采集器。便携版解压整个 ZIP 后运行 `ProtoLens/ProtoLens.exe`。
+**Windows 安装版**：运行下载的 `ProtoLens-latest.exe`，安装后打开快捷方式；便携版解压整个 ZIP 后运行 `ProtoLens/ProtoLens.exe`，无需另装 Java、Node 或采集器。
 
-**源码版**：准备 JDK 21、Node.js 22.12+ 和 npm，在**仓库根目录**执行：
+**macOS 便携版**：当前发布的是命令行启动包，需先安装 Java 21。解压整个 tar.gz，在终端进入解压后的 `ProtoLens` 目录执行 `sh ./ProtoLens`；Node 和采集器随包提供。原生工具须匹配本机 Apple Silicon / Intel 架构，不能直接混用其他架构或系统的包。
 
-```powershell
-.\start-protolens.cmd
-```
+**Linux 便携版**：解压整个 tar.gz，在解压目录执行 `./ProtoLens/bin/ProtoLens`。桌面打开和托盘功能取决于桌面环境，无桌面时查看日志给出的本机页面地址。
+
+**源码版**：准备 JDK 21、Node.js 22.12+ 和 npm，在仓库根目录执行：
+
+| 系统 | 启动命令 |
+| --- | --- |
+| Windows（PowerShell / CMD） | `.\start-protolens.cmd` |
+| macOS（终端） | `sh ./start-protolens.sh` |
+| Linux（终端） | `sh ./start-protolens.sh` |
+
+脚本按自身位置定位仓库，支持带空格的目录。需要启动前提取字典时，Windows 使用 `.\start-protolens.cmd "D:/client/project"`；macOS / Linux 使用 `sh ./start-protolens.sh "/实际路径/client project"`。提取失败时停止启动。无需单独运行 `collect-protolens.cmd` / `collect-protolens.sh`，它们仅保留为兼容入口。
 
 安装版和便携版已内置采集器，可直接使用。源码版首次缺少采集器时自动下载固定版本、校验 SHA-256 并缓存，之后复用；无需手动下载、复制文件或安装 Python。首次自动准备需要联网，失败后检查网络并重启工作台即可重试，页面及离线导入仍可使用。
 
@@ -42,7 +48,7 @@
 | --- | --- |
 | 安装版 / 静态页面、后端 | `http://127.0.0.1:18766` |
 | 源码开发页面（Vite 热更新） | `http://127.0.0.1:5174` |
-| Windows 采集代理 | `127.0.0.1:18888` |
+| HTTP / HTTPS 采集代理（各平台） | `127.0.0.1:18888` |
 | MCP（Streamable HTTP） | `http://127.0.0.1:18766/mcp` |
 
 ## 使用流程
@@ -50,13 +56,21 @@
 ### 实时采集
 
 1. **加载协议**：打开“设置 / 协议加载”，填写客户端根目录、任意分包目录或 `thrift_data.js` 完整路径，点击“查找协议文件”→选择版本→“加载协议并记住路径”。默认来源有效时启动自动加载；来源缺失时可启动后补填。
-2. **首次信任证书**：启动采集器后，双击数据目录下的 `mitmproxy-conf/mitmproxy-ca-cert.cer` →“安装证书”→“当前用户”→“将所有的证书都放入下列存储”→“浏览”→“受信任的根证书颁发机构”→完成。源码版与安装版的数据目录不同，需信任各自生成的证书；只安装 `.cer`，不分享私钥。
-3. **系统代理**：采集器就绪后自动尝试接管 Windows 系统代理。已有手动代理、PAC 或自动检测配置时，页面会先提示二次确认；选择“保留原代理”不会修改网络。也可用“接管系统代理 / 恢复原代理”按钮切换。
-4. **开始采集**：页面点击“开始采集”，等待采集源接入。自动接管关闭时，可自行将 Windows 代理设为 `127.0.0.1:18888`。程序只管理系统代理，不保证识别 VPN，也不会关闭其 TUN 模式；是否暂停 TUN 由用户决定。
+2. **首次信任证书**：在“连接与诊断”查看实际公开证书路径，默认位于数据目录的 `mitmproxy-conf/mitmproxy-ca-cert.cer`，按下表导入。源码版与发行包的数据目录不同；不要导入或分享同目录内的私钥。
+3. **配置代理**：按下表为游戏使用的网络配置 HTTP 和 HTTPS 代理，地址 `127.0.0.1`，端口以页面为准，默认 `18888`。自动代理接管目前仅支持 Windows。
+4. **开始采集**：页面点击“开始采集”。程序不保证识别 VPN，也不会关闭其 TUN 模式，是否暂停 TUN 由用户决定。
 5. **操作并查看**：完全关闭并重新打开小游戏，再执行目标操作。搜索协议（例如 `CgAllianceTechDonate`），点击消息查看字段；CS 为客户端发送，SC 为服务端下发。点选消息暂停跟随，“回到最新”恢复跟随。
-6. **保存与退出**：停止采集时自行选择是否保存，也可保存操作区间快照；未保存的记录退出后丢失。从托盘退出时自动恢复接管前的代理；其他软件已改过代理时保留它的新设置。旧版手动代理若已指向采集端口，确认接管后退出会关闭该遗留手动代理，无法恢复未知的更早 VPN 配置。关闭浏览器不会停止后端。
+6. **保存与退出**：停止采集时自行选择是否保存，也可保存操作区间快照；未保存的记录退出后丢失。Windows 从托盘退出时自动恢复接管前的代理；其他软件已改过代理时保留它的新设置。旧版手动代理若已指向采集端口，确认接管后退出会关闭该遗留手动代理，无法恢复未知的更早 VPN 配置。关闭浏览器不会停止后端。
 
-**清空会话**：打开实时采集区的“会话操作 → 清空本次采集消息”，确认后清空本次采集所有未保存记录的消息和标记。记录、当前选择、连接及解压上下文保持，后续消息继续写入原记录；历史导入、已保存记录及快照不受影响。消息序号继续递增，不重用。
+| 系统 | 信任公开 CA 证书 | 配置与恢复代理 |
+| --- | --- | --- |
+| Windows | 双击公开证书 → 安装证书 → 当前用户 → 受信任的根证书颁发机构 | 采集器就绪后可自动尝试接管，已有代理时先确认；也可点击“接管系统代理 / 恢复原代理”。已接管的设置在退出时恢复。 |
+| macOS | 在“钥匙串访问”导入证书，双击证书 → 信任，按提示设置信任并完成系统验证 | 系统设置 → 网络 → 当前网络 → 详细信息 → 代理，配置网页代理（HTTP）和安全网页代理（HTTPS）；退出后手动恢复原配置。系统版本不同，菜单名称可能略有差异。 |
+| Linux | 使用发行版或客户端的证书管理工具导入公开 CA | 在桌面网络设置或游戏客户端中配置 HTTP / HTTPS 代理；不同发行版入口不同，退出后手动恢复原配置。 |
+
+客户端使用独立证书库或不遵循桌面代理时，需在客户端单独配置。配置后重开游戏，确认页面收到的帧数增加；不能仅凭代理设置成功就认为已经采集到游戏消息。
+
+**清空会话**：点击实时采集区的“清空本次采集消息”，确认后清空本次采集所有未保存记录的消息和标记。记录、当前选择、连接及解压上下文保持，后续消息继续写入原记录；历史导入、已保存记录及快照不受影响。消息序号继续递增，不重用。
 
 **搜索与上下文**：协议 ID 表示协议类型；消息序号表示该条消息在抓包记录中的原始顺序，两者分别查询。点击搜索结果的协议名或“上下文”，可查看附近消息；目标行会滚动到可见位置并整行高亮。“返回搜索结果”恢复原查询、筛选、排序、页码和滚动位置。筛选会暂停列表跟随，后台采集继续。
 
@@ -64,7 +78,7 @@
 
 **查询状态与恢复**：条件标签、计数、页码和列表在查询成功后同时更新；等待、失败或取消时保留上次成功结果，底部分页区显示该结果的排序和取数时间。列表不因查询被蒙层遮挡，可使用状态提示中的取消或重试。没有匹配结果时，可检查筛选或清除全部筛选；超过三个条件默认折叠展示，其余条件可展开逐个移除。
 
-**上下文范围**：点击协议名默认进入当前连接的上下文，并保留结果原有排序及心跳条件；行操作菜单和记录标题区可切换“当前连接上下文 / 全部连接上下文”。跳转成功后才更新显示条件，失败时保留原结果。“返回搜索结果”恢复原查询现场。
+**上下文范围**：普通列表点击协议名查看详情；搜索结果点击协议名定位到上下文，并保留排序及心跳条件。行操作菜单可切换“当前连接上下文 / 全部连接上下文”。跳转成功后才更新显示条件，失败时保留原结果。“返回搜索结果”恢复原查询现场。
 
 **详情与长字段**：切换消息时先显示目标消息序号，新详情加载完成前隐藏旧消息体；失败后可单独重试。较长字段值默认显示前 240 字符，可按需展开更多内容，或点击“复制值”复制完整原始值。行操作菜单在悬停、选中或键盘聚焦时显示，低频列可在表格设置中关闭。
 
@@ -72,9 +86,9 @@
 
 默认采集 `bjxuejing.cn`、`tuyoo.com` 下以 `/websocket` 开头的 WebSocket 消息。地址变化时打开“设置 / 协议加载”→“采集目标”，编辑域名和路径，点击“保存采集目标”，按提示重启工作台并重进游戏。规则直接写入启动配置，页面会区分当前生效值与待生效值。切换协议字典后重新开始采集并重开游戏；已有记录保留自己的字典。
 
-### 导入已有抓包
+### 扩展功能：导入已有抓包
 
-左下角“本地导入”选择 `.saz` 文件，或填写绝对路径后点击“从路径导入”。导出 SAZ 时选择**从握手开始的完整主游戏 WebSocket 会话**；离线导入无需开启系统代理。
+点击“记录 / 导入”，在“本地导入”选择 `.saz` 文件，或填写绝对路径后点击“从路径导入”。导出 SAZ 时选择**从握手开始的完整主游戏 WebSocket 会话**；离线导入无需开启系统代理。页面“更多 → SAZ 导入说明”只介绍这项扩展功能；实时采集使用顶部“接入步骤”。
 
 ### 让 AI 分析
 
@@ -88,8 +102,12 @@ MCP 提供记录列表、消息搜索、完整字段、前后文、协议定义�
 
 | 运行方式 | 启动配置 | 默认数据目录 |
 | --- | --- | --- |
-| 源码版 | `protolens/config/analyzer.json` | `protolens/data/` |
+| 源码版 | `config/analyzer.json` | `data/` |
 | Windows 安装版 / 便携版 | `%LOCALAPPDATA%/ProtoLens/analyzer.json` | `%LOCALAPPDATA%/ProtoLens/data/` |
+| macOS 发行包 | `~/Library/Application Support/ProtoLens/analyzer.json` | `~/Library/Application Support/ProtoLens/data/` |
+| Linux 发行包 | `~/.local/share/ProtoLens/analyzer.json` | `~/.local/share/ProtoLens/data/` |
+
+Linux 设置了绝对路径的 `XDG_DATA_HOME` 时使用其下的 `ProtoLens`；更名前的用户数据目录存在时继续复用。实际位置以页面和日志为准。
 
 安装版首次创建用户配置，升级不覆盖。页面设置和启动日志显示实际配置路径、数据目录与端口。
 
@@ -97,7 +115,7 @@ MCP 提供记录列表、消息搜索、完整字段、前后文、协议定义�
 | --- | --- | --- |
 | `serverPort` | `18766` | 后端、静态页面及 MCP 端口 |
 | `frontendPort` | `5174` | 源码开发页面端口 |
-| `collectorPort` | `18888` | 采集代理端口，需与 Windows 代理一致 |
+| `collectorPort` | `18888` | 采集代理端口，需与系统或客户端的 HTTP / HTTPS 代理一致 |
 | `frontendMode` | `auto` | 源码使用 `dev`，发行包使用 `static` |
 | `openBrowser` | `true` | 启动后自动打开页面 |
 | `autoStartCollector` | `true` | 随后端启动采集器，缺失时自动准备 |
@@ -113,42 +131,59 @@ MCP 提供记录列表、消息搜索、完整字段、前后文、协议定义�
 
 修改端口、启动开关、采集域名或路径后重启；协议来源和缓存预算可在页面保存，缓存预算在停止采集后修改，新连接生效。达到任一缓存上限淘汰最旧消息；临时记录最多 32 份，可自行保存或删除。
 
-启动配置优先级：**默认值 < JSON 配置 < 显式 JVM 参数 < 命令行参数**。页面选择的协议来源与缓存预算另存 `data/settings.json`，优先于配置默认值。路径在 JSON 中推荐使用 `/`。
+启动配置优先级：**默认值 < JSON 配置 < 显式 JVM 参数 < 命令行参数**。页面选择的协议来源与缓存预算另存 `data/settings.json`，优先于配置默认值。路径在 JSON 中推荐使用 `/`。 Windows 可填写 `D:/client/project`；macOS 可填写 `/Users/用户名/项目 目录`；Linux 可填写 `/home/用户名/project`。页面和 JSON 使用工作台所在电脑的实际完整路径，不自动展开 `~`、`$HOME` 或 `file://`；空格、中文无需手动转义。终端命令传入带空格的路径时，使用引号包住整个参数。
 
 ```powershell
 # 指定其他启动配置（仓库根目录）
 .\gradlew.bat run "-PanalyzerConfig=D:/config/analyzer.json"
 ```
 
-IDE 程序参数或发行包 EXE 可使用 `--config <文件绝对路径>`，或用 `--data-dir <目录绝对路径>` 隔离数据。抓包在数据目录的 `captures/`，后端日志为 `logs/analyzer.log`，采集器日志为 `logs/collector.log`，协议提取日志为 `logs/catalog-extract.log`。代理恢复备份位于用户应用目录的 `system-proxy/proxy-lease.json`，异常退出后下次自动启动会核验并恢复；不要手动复制此备份。抓包、本机数据、证书及凭证不加入版本控制。
+macOS / Linux：`sh ./gradlew run "-PanalyzerConfig=/实际路径/analyzer.json"`。
+
+IDE 程序参数或发行包启动器 可使用 `--config <文件绝对路径>`，或用 `--data-dir <目录绝对路径>` 隔离数据。抓包在数据目录的 `captures/`，后端日志为 `logs/analyzer.log`，采集器日志为 `logs/collector.log`，协议提取日志为 `logs/catalog-extract.log`。代理恢复备份位于用户应用目录的 `system-proxy/proxy-lease.json`，异常退出后下次自动启动会核验并恢复；不要手动复制此备份。抓包、本机数据、证书及凭证不加入版本控制。
 
 ## 常用命令
 
 以下命令均在**仓库根目录**执行。
 
-| 用途 | 命令 |
-| --- | --- |
-| 启动 | `.\gradlew.bat run` |
-| 后端测试 | `.\gradlew.bat test` |
-| 构建前端 | `.\gradlew.bat webBuild` |
-| 格式化 Java 与前端 | `.\gradlew.bat format` |
-| 只检查格式 | `.\gradlew.bat checkFormat` |
-| 手动提取协议字典 | `.\gradlew.bat extractCatalog "-PcompetitorDir=D:/client/slgProject"` |
-| 打包安装版 | `.\gradlew.bat packageInstaller` |
-| 打包便携版 | `.\gradlew.bat packagePortable` |
-| 检查分发内容 | `.\gradlew.bat verifyDistribution` |
+| 用途 | Windows | macOS / Linux |
+| --- | --- | --- |
+| 一键启动 | `.\start-protolens.cmd` | `sh ./start-protolens.sh` |
+| 直接运行 | `.\gradlew.bat run` | `sh ./gradlew run` |
+| 后端测试 | `.\gradlew.bat test` | `sh ./gradlew test` |
+| 构建前端 | `.\gradlew.bat webBuild` | `sh ./gradlew webBuild` |
+| 格式化 | `.\gradlew.bat format` | `sh ./gradlew format` |
+| 格式检查 | `.\gradlew.bat checkFormat` | `sh ./gradlew checkFormat` |
+| 提取协议字典 | `.\gradlew.bat extractCatalog "-PcompetitorDir=D:/client/project"` | `sh ./gradlew extractCatalog "-PcompetitorDir=/实际路径/client project"` |
+| 打包本机安装版 | `.\gradlew.bat packageInstaller` | `sh ./gradlew packageInstaller` |
+| 打包本机便携版 | `.\gradlew.bat packagePortable` | `sh ./gradlew packagePortable` |
+| 检查分发内容 | `.\gradlew.bat verifyDistribution` | `sh ./gradlew verifyDistribution` |
+| 单独构建前端（web 目录） | `npm.cmd run build` | `npm run build` |
+| Node 工具测试 | `node --experimental-strip-types --test tools/*.test.mjs` | `node --experimental-strip-types --test tools/*.test.mjs` |
+
+macOS / Linux 使用 `sh` 运行脚本，不依赖下载或拷贝后是否保留可执行权限。打包必须在目标系统及架构原生执行，不能把 Windows 输出当成 macOS / Linux 包。
 
 ### 打包参数与产物
 
-构建需 JDK 21、Node/npm；缺少默认 mitmdump 时会自动准备；Windows 安装器另需 **WiX 3**，便携版无需 WiX。Node 默认从 PATH 查找，mitmdump 默认取 `data/mitmproxy/mitmdump.exe`。工具不在默认位置时：
+构建需 JDK 21、Node/npm；缺少默认 mitmdump 时会自动准备；Windows 安装器另需 **WiX 3**，便携版无需 WiX。Node 默认从 PATH 查找，mitmdump 在 Windows 默认取 `data/mitmproxy/mitmdump.exe`，在 macOS / Linux 默认取 `data/mitmproxy/mitmdump`。工具不在默认位置时：
 
 ```powershell
 .\gradlew.bat packageInstaller `
   "-PanalyzerWixDir=C:/Program Files (x86)/WiX Toolset v3.14/bin" `
   "-PanalyzerNodeExecutable=D:/dev/Node/node.exe" `
   "-PanalyzerMitmdumpExecutable=D:/tools/mitmproxy/mitmdump.exe" `
-  -PanalyzerVersion=0.1.3
+  -PanalyzerVersion=0.1.5
 ```
+
+macOS / Linux 使用同名 Gradle 属性和本机程序路径，使用 POSIX 换行符，例如：
+
+```sh
+sh ./gradlew packagePortable \
+  "-PanalyzerNodeExecutable=/实际路径/node" \
+  "-PanalyzerMitmdumpExecutable=/实际路径/mitmdump"
+```
+
+Windows 原生安装器需要 WiX 3；macOS / Linux 安装器依赖各自系统的打包工具。当前 macOS 发布流程使用 `stageDistribution` 生成上述 Java 21 启动包，与本机 `packagePortable` 生成的原生 `.app` 镜像不是同一形态。
 
 | 产物 | 模块内路径 |
 | --- | --- |
@@ -156,7 +191,7 @@ IDE 程序参数或发行包 EXE 可使用 `--config <文件绝对路径>`，或
 | Windows 便携 ZIP | `build/distributions/ProtoLens-<版本>-windows-x64.zip` |
 | 完整运行目录 | `build/app-image/ProtoLens/` |
 
-WiX 已在 PATH 时可省略 `analyzerWixDir`；版本默认取 `src/main/resources/analyzer-version.properties`。离线打包可传 `-PanalyzerNodeLicense=<对应版本LICENSE>`、`-PanalyzerMitmproxyLicense=<对应版本LICENSE>`。安装包不包含本机抓包、字典或证书；覆盖升级前先从托盘退出。其他平台须在对应系统原生构建，当前已验证 Windows x64。
+WiX 已在 PATH 时可省略 `analyzerWixDir`；版本默认取 `src/main/resources/analyzer-version.properties`。离线打包可传 `-PanalyzerNodeLicense=<对应版本LICENSE>`、`-PanalyzerMitmproxyLicense=<对应版本LICENSE>`。安装包不包含本机抓包、字典或证书；覆盖升级前先从托盘退出。平台实机验收与 CI 构建检查应分开记录；在 Windows 做脚本合同检查不能替代 macOS / Linux 实机启动。
 
 ## 常见问题
 

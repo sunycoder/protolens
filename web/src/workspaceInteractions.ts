@@ -57,7 +57,7 @@ export function listMinimumWidth(columns: TableColumns) {
     (columns.bytes ? 76 : 0) +
     (columns.sequence ? 76 : 0) +
     (columns.connection ? 112 : 0) +
-    (columns.actions ? 50 : 0)
+    (columns.actions ? 86 : 0)
   );
 }
 export function chooseDetailLayout(
