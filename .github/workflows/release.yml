@@ -69,16 +69,17 @@ jobs:
         shell: bash
         run: |
           gradle stageDistribution "-PanalyzerMitmdumpExecutable=$MITMDUMP_PATH"
-          rm -rf build/macos-image build/distributions
-          mkdir -p build/macos-image build/distributions
-          "$JAVA_HOME/bin/jpackage" --type app-image --name ProtoLens \
-            --input build/distribution-input \
-            --dest build/macos-image \
-            --main-jar protolens.jar \
-            --app-version 0.1.3 \
-            --vendor Stupidbird \
-            --add-modules java.se,jdk.unsupported,jdk.crypto.ec,jdk.zipfs
-          tar -czf build/distributions/ProtoLens-0.1.3-macos.tar.gz -C build/macos-image ProtoLens.app
+          rm -rf build/macos-portable build/distributions
+          mkdir -p build/macos-portable/ProtoLens build/distributions
+          cp -R build/distribution-input/. build/macos-portable/ProtoLens/
+          cat > build/macos-portable/ProtoLens/ProtoLens <<'EOF'
+          #!/bin/sh
+          set -e
+          cd "$(dirname "$0")"
+          exec java -jar protolens.jar "$@"
+          EOF
+          chmod +x build/macos-portable/ProtoLens/ProtoLens
+          tar -czf build/distributions/ProtoLens-0.1.3-macos.tar.gz -C build/macos-portable ProtoLens
       - name: 上传发布产物
         uses: actions/upload-artifact@v4
         with:
