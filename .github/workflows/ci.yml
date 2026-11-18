@@ -34,6 +34,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: 检查平台选择
         run: gradle checkPackagingPlatforms printPackagingPlatform
+      - name: 安装前端依赖
+        run: gradle webInstall
       - name: 后端测试
         run: gradle test
       - name: 前端构建
