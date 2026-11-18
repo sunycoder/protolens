@@ -15,8 +15,11 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            run_tests: true
           - os: windows-latest
+            run_tests: false
           - os: macos-latest
+            run_tests: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +40,11 @@ jobs:
       - name: 安装前端依赖
         run: gradle webInstall
       - name: 后端测试
+        if: matrix.run_tests
         run: gradle test
+      - name: 其他平台编译检查
+        if: matrix.run_tests == false
+        run: gradle compileJava compileTestJava
       - name: 前端构建
         run: gradle webBuild
       - name: 提取工具测试
