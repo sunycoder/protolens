@@ -41,19 +41,32 @@ def clientDirectory = providers.gradleProperty('competitorDir')
     }
 }
 
-tasks.register('webFormat', Exec) {
-    group = 'formatting'
-    description = '格式化本模块 Vue、TypeScript、CSS 和前端配置。'
-    dependsOn 'webInstall'
-    workingDir 'web'
-    commandLine npmCommand, 'run', 'format'
+// 格式化不能依赖 npm ci：它会删除 node_modules，Windows 下会撞上 Vite 正在使用的 esbuild.exe。
+// Prettier 使用 package.json 中的固定版本，独立安装到构建缓存；不修改运行中的前端依赖。
+def webFormatterVersion = new groovy.json.JsonSlurper().parse(file('web/package.json')).devDependencies.prettier
+if (!(webFormatterVersion ==~ /\d+\.\d+\.\d+/)) {
+    throw new GradleException('Prettier 必须使用固定版本，才能准备独立的格式化工具。')
 }
-tasks.register('checkWebFormat', Exec) {
-    group = 'verification'
-    description = '检查前端格式，不修改文件。'
-    dependsOn 'webInstall'
-    workingDir 'web'
-    commandLine npmCommand, 'run', 'format:check'
+def webFormatterDirectory = layout.buildDirectory.dir('web-formatter').get().asFile
+def webFormatterCli = new File(webFormatterDirectory, 'node_modules/prettier/bin/prettier.cjs')
+tasks.register('webFormatterInstall', Exec) {
+    description = '准备独立的 Prettier，不重装 web/node_modules。'
+    workingDir projectDir
+    commandLine npmCommand, 'install', '--prefix', webFormatterDirectory.absolutePath,
+            '--no-save', '--package-lock=false', '--ignore-scripts', '--no-audit', '--no-fund',
+            "prettier@${webFormatterVersion}"
+    inputs.property('prettierVersion', webFormatterVersion)
+    outputs.dir(new File(webFormatterDirectory, 'node_modules/prettier'))
+}
+['webFormat': '--write', 'checkWebFormat': '--check'].each { taskName, mode ->
+    tasks.register(taskName, Exec) {
+        group = taskName == 'webFormat' ? 'formatting' : 'verification'
+        description = taskName == 'webFormat' ? '格式化本模块 Vue、TypeScript、CSS 和前端配置。' : '检查前端格式，不修改文件。'
+        dependsOn 'webFormatterInstall'
+        workingDir 'web'
+        commandLine 'node', webFormatterCli.absolutePath, mode,
+                'src', 'vite.config.ts', 'index.html', 'package.json', 'tsconfig.json', '.prettierrc.json'
+    }
 }
 tasks.register('format') {
     group = 'formatting'

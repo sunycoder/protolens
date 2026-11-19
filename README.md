@@ -1,6 +1,6 @@
 # ProtoLens
 
-独立的本机抓包与协议分析工具：查看游戏发了什么请求、服务端推送了什么数据，并结合客户端源码交给 AI 分析。无需启动游戏后端。
+独立的本机抓包与协议分析工具：查看游戏发了什么请求、服务端推送了什么数据，并结合客户端源码交给 AI 分析。
 
 ## 功能
 
@@ -179,6 +179,8 @@ IDE 程序参数或发行包启动器 可使用 `--config <文件绝对路径>`�
 | 检查分发内容 | `.\gradlew.bat verifyDistribution` | `sh ./gradlew verifyDistribution` |
 | 单独构建前端（web 目录） | `npm.cmd run build` | `npm run build` |
 | Node 工具测试 | `node --experimental-strip-types --test tools/*.test.mjs` | `node --experimental-strip-types --test tools/*.test.mjs` |
+
+`format` / `checkFormat` 使用独立的 Prettier，版本与 `web/package.json` 保持一致，首次安装到 `build/web-formatter/` 后复用；不执行前端 `npm ci`，可在开发页面运行期间使用。前端依赖确需重装时，先停止开发服务器再执行 `webInstall`，避免 Windows 可执行文件被占用。
 
 macOS / Linux 使用 `sh` 运行脚本，不依赖下载或拷贝后是否保留可执行权限。打包必须在目标系统及架构原生执行，不能把 Windows 输出当成 macOS / Linux 包。
 

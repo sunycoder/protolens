@@ -60,8 +60,21 @@ public final class MessageQuery {
             String order,
             String include,
             String exclude) {
-        this(query, direction, status, connection, hideHeartbeat, from, to, offset, limit,
-                order, include, exclude, "", "");
+        this(
+                query,
+                direction,
+                status,
+                connection,
+                hideHeartbeat,
+                from,
+                to,
+                offset,
+                limit,
+                order,
+                include,
+                exclude,
+                "",
+                "");
     }
 
     public MessageQuery(
@@ -78,8 +91,21 @@ public final class MessageQuery {
             String include,
             String exclude,
             String protocolId) {
-        this(query, direction, status, connection, hideHeartbeat, from, to, offset, limit,
-                order, include, exclude, protocolId, "");
+        this(
+                query,
+                direction,
+                status,
+                connection,
+                hideHeartbeat,
+                from,
+                to,
+                offset,
+                limit,
+                order,
+                include,
+                exclude,
+                protocolId,
+                "");
     }
 
     public MessageQuery(
