@@ -3,6 +3,7 @@ package com.lashouwan.protolens.config;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.lashouwan.protolens.constant.AnalyzerLimits;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -98,12 +99,12 @@ public final class AnalyzerSettingsStore {
         JsonNode bytes = input.path("maxCacheMiB");
         if (!count.isIntegralNumber()
                 || !count.canConvertToInt()
-                || count.asInt() < 100
-                || count.asInt() > 50000
+                || count.asInt() < AnalyzerLimits.MIN_CACHE_MESSAGES
+                || count.asInt() > AnalyzerLimits.MAX_CACHE_MESSAGES
                 || !bytes.isIntegralNumber()
                 || !bytes.canConvertToInt()
-                || bytes.asInt() < 1
-                || bytes.asInt() > 256) {
+                || bytes.asInt() < AnalyzerLimits.MIN_CACHE_MIB
+                || bytes.asInt() > AnalyzerLimits.MAX_CACHE_MIB) {
             throw new IllegalArgumentException("maxMessages 需为 100～50000，maxCacheMiB 需为 1～256 的整数");
         }
     }

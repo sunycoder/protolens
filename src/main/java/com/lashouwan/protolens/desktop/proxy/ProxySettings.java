@@ -1,5 +1,7 @@
 package com.lashouwan.protolens.desktop.proxy;
 
+import com.lashouwan.protolens.constant.NetworkConstants;
+
 import java.util.Locale;
 
 /** 平台代理快照；Windows 保留 WinINet 默认 LAN 字段，macOS 保存单个网络服务的完整检查快照。 */
@@ -50,12 +52,14 @@ public record ProxySettings(
             return mac.pointsTo(port);
         }
         String value =
-                server.toLowerCase(Locale.ROOT).replace(" ", "").replace("localhost", "127.0.0.1");
-        String address = "127.0.0.1:" + port;
+                server.toLowerCase(Locale.ROOT)
+                        .replace(" ", "")
+                        .replace("localhost", NetworkConstants.LOOPBACK_HOST);
+        String address = NetworkConstants.LOOPBACK_HOST + ":" + port;
         return (flags & MANUAL) != 0
                 && (value.equals(address)
-                        || value.equals("http=" + address + ";https=" + address)
-                        || value.equals("https=" + address + ";http=" + address));
+                        || ("http=" + address + ";https=" + address).equals(value)
+                        || ("https=" + address + ";http=" + address).equals(value));
     }
 
     public static ProxySettings local(int port, ProxySettings original) {

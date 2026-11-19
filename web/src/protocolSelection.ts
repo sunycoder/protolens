@@ -13,7 +13,7 @@ export function protocolChoice(row: {
   const token =
     row.protocolId === undefined ? `name:${name}` : `id:${row.protocolId}`;
   return {
-    key: row.protocolId === undefined ? `name:${name}` : `id:${row.protocolId}`,
+    key: token,
     token,
     label: name
       ? `${name}${row.protocolId === undefined ? "" : ` (${row.protocolId})`}`

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lashouwan.protolens.capture.CaptureStore;
 import com.lashouwan.protolens.capture.LiveCaptureService;
 import com.lashouwan.protolens.constant.AnalyzerLimits;
+import com.lashouwan.protolens.constant.NetworkConstants;
 import com.lashouwan.protolens.protocol.ProtocolCatalog;
 
 import io.vertx.core.Vertx;
@@ -111,7 +112,9 @@ public final class LiveCaptureController implements AutoCloseable {
                                                 mapper.createObjectNode()
                                                         .put(
                                                                 "origin",
-                                                                "http://127.0.0.1:" + boundPort)
+                                                                NetworkConstants
+                                                                                .HTTP_LOOPBACK_PREFIX
+                                                                        + boundPort)
                                                         .put("token", token)
                                                         .put("schemaVersion", 1)));
         router.get("/api/live/events")

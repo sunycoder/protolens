@@ -27,6 +27,12 @@ public final class CaptureMessageQuery {
 
     private static final int SEARCH_PREVIEW_MAX_FIELDS = 4;
     private static final int SEARCH_PREVIEW_MAX_PATH_LENGTH = 1024;
+    private static final int PREVIEW_MAX_FIELDS = 4;
+    private static final int PREVIEW_VALUE_LENGTH = 60;
+    private static final int SEARCH_PREVIEW_CONTEXT_BEFORE = 20;
+    private static final int SEARCH_PREVIEW_VALUE_LENGTH = 80;
+    private static final String PROTOCOL_ID_PREFIX = "id:";
+    private static final String PROTOCOL_NAME_PREFIX = "name:";
     private final ObjectMapper mapper;
 
     public CaptureMessageQuery(ObjectMapper mapper) {
@@ -116,7 +122,9 @@ public final class CaptureMessageQuery {
             // 只摘要顶层前四个字段，大容器显示条数，不下发完整 body。
             StringBuilder preview = new StringBuilder();
             Iterator<Map.Entry<String, JsonNode>> body = node.path("body").fields();
-            for (int fieldIndex = 0; body.hasNext() && fieldIndex < 4; fieldIndex++) {
+            for (int fieldIndex = 0;
+                    body.hasNext() && fieldIndex < PREVIEW_MAX_FIELDS;
+                    fieldIndex++) {
                 Map.Entry<String, JsonNode> field = body.next();
                 if (!preview.isEmpty()) {
                     preview.append(" · ");
@@ -125,7 +133,7 @@ public final class CaptureMessageQuery {
                 String text = value.isContainerNode() ? "[" + value.size() + "项]" : value.asText();
                 preview.append(field.getKey())
                         .append('=')
-                        .append(text.substring(0, Math.min(60, text.length())));
+                        .append(text.substring(0, Math.min(PREVIEW_VALUE_LENGTH, text.length())));
             }
             // 搜索时优先展示实际命中的嵌套字段；协议名匹配但消息体未命中时保留普通摘要。
             String matchedPreview =
@@ -170,12 +178,16 @@ public final class CaptureMessageQuery {
                     && (path.toLowerCase(Locale.ROOT).contains(keyword)
                             || (!value.isContainerNode() && lowerText.contains(keyword)))) {
                 // 长文本保留命中附近内容，而非始终裁剪开头导致搜索词不可见。
-                int start = Math.max(0, lowerText.indexOf(keyword) - 20);
+                int start = Math.max(0, lowerText.indexOf(keyword) - SEARCH_PREVIEW_CONTEXT_BEFORE);
                 matches.add(
                         path
                                 + "="
                                 + (start > 0 ? "…" : "")
-                                + text.substring(start, Math.min(text.length(), start + 80)));
+                                + text.substring(
+                                        start,
+                                        Math.min(
+                                                text.length(),
+                                                start + SEARCH_PREVIEW_VALUE_LENGTH)));
             }
             if (!value.isContainerNode() || path.length() >= SEARCH_PREVIEW_MAX_PATH_LENGTH) {
                 continue;
@@ -209,15 +221,17 @@ public final class CaptureMessageQuery {
     private boolean matchesProtocol(JsonNode message, String protocol, String patterns) {
         String value = protocol.toLowerCase(Locale.ROOT);
         for (String pattern : patterns.split("[,，\\s]+")) {
-            if (pattern.startsWith("id:")) {
+            if (pattern.startsWith(PROTOCOL_ID_PREFIX)) {
                 if (message.hasNonNull("protocolId")
-                        && pattern.substring(3).equals(message.path("protocolId").asText())) {
+                        && pattern.substring(PROTOCOL_ID_PREFIX.length())
+                                .equals(message.path("protocolId").asText())) {
                     return true;
                 }
                 continue;
             }
-            if (pattern.startsWith("name:")) {
-                if (pattern.substring(5).equals(message.path("protocolName").asText())) {
+            if (pattern.startsWith(PROTOCOL_NAME_PREFIX)) {
+                if (pattern.substring(PROTOCOL_NAME_PREFIX.length())
+                        .equals(message.path("protocolName").asText())) {
                     return true;
                 }
                 continue;

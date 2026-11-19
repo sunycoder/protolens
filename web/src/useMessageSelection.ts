@@ -1,3 +1,7 @@
+import {
+  DETAIL_REQUEST_TIMEOUT_MS,
+  DETAIL_PREFETCH_MAX_BYTES,
+} from "./constants.ts";
 import { ref, shallowRef } from "vue";
 import { RequestGate } from "./workspaceRefresh";
 import { api, type Capture, type Packet } from "./types";
@@ -43,7 +47,7 @@ export function useMessageSelection(
       detailGate.cancel();
       detailLoading.value = false;
       detailError.value = `消息 #${row.index} 详情等待超时，可重试`;
-    }, 15000);
+    }, DETAIL_REQUEST_TIMEOUT_MS);
     try {
       const detail = await api<Packet>(
         `/api/captures/${id}/messages/${row.index}`,
@@ -55,7 +59,10 @@ export function useMessageSelection(
       selected.value = detail;
       detailMs.value = performance.now() - start;
       // 原始字节缺失时不缓存，避免将未知大小的大包当作小包长期驻留。
-      if (detail.bytes !== undefined && detail.bytes <= 128 * 1024) {
+      if (
+        detail.bytes !== undefined &&
+        detail.bytes <= DETAIL_PREFETCH_MAX_BYTES
+      ) {
         detailCache.set(key, detail);
         if (detailCache.size > 24)
           detailCache.delete(detailCache.keys().next().value!);

@@ -7,11 +7,14 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Pattern;
 
 /** 采集目标值对象：域名包含其子域名，路径按前缀匹配；代理解密与消息筛选共用一份配置。 */
 public final class CaptureTargets {
     private static final List<String> DEFAULT_HOSTS = List.of("bjxuejing.cn", "tuyoo.com");
     private static final List<String> DEFAULT_PATHS = List.of("/websocket");
+
+    private static final Pattern IPV4 = Pattern.compile("[0-9]+(?:\\.[0-9]+){3}");
 
     /** 规范化为小写 ASCII 的域名或 IPv4 地址；不包含协议、端口和通配符。 */
     private final List<String> hosts;
@@ -43,7 +46,7 @@ public final class CaptureTargets {
                     || ascii.isBlank()) {
                 throw new IllegalArgumentException("采集目标仅填写域名或 IPv4，不含协议、端口、路径和通配符");
             }
-            if (ascii.matches("[0-9]+(?:\\.[0-9]+){3}")) {
+            if (IPV4.matcher(ascii).matches()) {
                 for (String octet : ascii.split("\\.")) {
                     if (octet.length() > 3 || Integer.parseInt(octet) > 255) {
                         throw new IllegalArgumentException("IPv4 地址格式无效：" + host);
@@ -90,7 +93,7 @@ public final class CaptureTargets {
     public String allowHostsPattern() {
         List<String> patterns = new ArrayList<>();
         for (String host : hosts) {
-            boolean ipv4 = host.matches("[0-9]+(?:\\.[0-9]+){3}");
+            boolean ipv4 = IPV4.matcher(host).matches();
             patterns.add((ipv4 ? "^" : "(?:^|\\.)") + host.replace(".", "\\.") + ":[0-9]+$");
         }
         return "(?i)(?:" + String.join("|", patterns) + ")";

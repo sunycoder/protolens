@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.lashouwan.protolens.constant.AnalyzerLimits;
+import com.lashouwan.protolens.enums.CompactType;
+import com.lashouwan.protolens.enums.ThriftType;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -24,7 +26,7 @@ public final class CompactThriftDecoder {
     private int offset;
 
     /** 递归共享读取预算，限制恶意容器和未知字段的总量。 */
-    private int budget = 1_000_000;
+    private int budget = AnalyzerLimits.MAX_THRIFT_READ_OPERATIONS;
 
     private final ArrayNode warnings;
 
@@ -86,27 +88,30 @@ public final class CompactThriftDecoder {
     private JsonNode value(int type, JsonNode schema, int depth, boolean fieldBoolean) {
         checkDepth(depth);
         consumeBudget();
-        return switch (type) {
-            case 1, 2 -> {
+        return switch (CompactType.fromCode(type)) {
+            case BOOLEAN_TRUE, BOOLEAN_FALSE -> {
                 int booleanValue = fieldBoolean ? type : octet();
-                if (booleanValue != 1 && booleanValue != 2) {
+                if (booleanValue != CompactType.BOOLEAN_TRUE.code()
+                        && booleanValue != CompactType.BOOLEAN_FALSE.code()) {
                     throw new IllegalArgumentException("非法布尔值");
                 }
-                yield mapper.getNodeFactory().booleanNode(booleanValue == 1);
+                yield mapper.getNodeFactory()
+                        .booleanNode(booleanValue == CompactType.BOOLEAN_TRUE.code());
             }
-            case 3 -> mapper.getNodeFactory().numberNode((byte) octet());
-            case 4, 5 -> {
+            case BYTE -> mapper.getNodeFactory().numberNode((byte) octet());
+            case I16, I32 -> {
                 long number = zigzag();
                 if (number < Integer.MIN_VALUE
                         || number > Integer.MAX_VALUE
-                        || (type == 4 && (number < Short.MIN_VALUE || number > Short.MAX_VALUE))) {
+                        || (type == CompactType.I16.code()
+                                && (number < Short.MIN_VALUE || number > Short.MAX_VALUE))) {
                     throw new IllegalArgumentException("Thrift 整数越界");
                 }
                 yield mapper.getNodeFactory().numberNode((int) number);
             }
             // I64 总是以十进制字符串输出，避免浏览器超过 2^53 后丢精度。
-            case 6 -> mapper.getNodeFactory().textNode(Long.toString(zigzag()));
-            case 7 -> {
+            case I64 -> mapper.getNodeFactory().textNode(Long.toString(zigzag()));
+            case DOUBLE -> {
                 require(8);
                 double number =
                         ByteBuffer.wrap(data, offset, 8).order(ByteOrder.LITTLE_ENDIAN).getDouble();
@@ -116,12 +121,12 @@ public final class CompactThriftDecoder {
                 }
                 yield mapper.getNodeFactory().numberNode(number);
             }
-            case 8 ->
+            case BINARY ->
                     binary(
                             schema.isArray()
-                                    && schema.path(0).asInt() == 11
+                                    && schema.path(0).asInt() == ThriftType.STRING.code()
                                     && schema.path(1).asInt() == 1);
-            case 9, 10 -> {
+            case LIST, SET -> {
                 int header = octet();
                 int size = header >>> 4;
                 if (size == 15) {
@@ -137,7 +142,7 @@ public final class CompactThriftDecoder {
                 }
                 yield list;
             }
-            case 11 -> {
+            case MAP -> {
                 int count = size();
                 checkContainer(count);
                 int types = count == 0 ? 0 : octet();
@@ -157,13 +162,12 @@ public final class CompactThriftDecoder {
                 map.set("$map", entries);
                 yield map;
             }
-            case 12 ->
+            case STRUCT ->
                     structure(
                             schema.isArray()
                                     ? catalog.fields(schema.path(1).asText())
                                     : mapper.missingNode(),
                             depth + 1);
-            default -> throw new IllegalArgumentException("未知 Compact 类型 " + type);
         };
     }
 
@@ -204,20 +208,7 @@ public final class CompactThriftDecoder {
     }
 
     private int thriftType(int compact) {
-        return switch (compact) {
-            case 1, 2 -> 2;
-            case 3 -> 3;
-            case 4 -> 6;
-            case 5 -> 8;
-            case 6 -> 10;
-            case 7 -> 4;
-            case 8 -> 11;
-            case 9 -> 15;
-            case 10 -> 14;
-            case 11 -> 13;
-            case 12 -> 12;
-            default -> throw new IllegalArgumentException("非法 Compact 类型 " + compact);
-        };
+        return CompactType.fromCode(compact).schemaType().code();
     }
 
     private int octet() {
@@ -266,13 +257,13 @@ public final class CompactThriftDecoder {
     }
 
     private void checkDepth(int depth) {
-        if (depth > 64) {
+        if (depth > AnalyzerLimits.MAX_THRIFT_DEPTH) {
             throw new IllegalArgumentException("结构体嵌套超过 64 层");
         }
     }
 
     private void checkContainer(int size) {
-        if (size > 100_000) {
+        if (size > AnalyzerLimits.MAX_THRIFT_CONTAINER_ELEMENTS) {
             throw new IllegalArgumentException("容器元素过多");
         }
     }

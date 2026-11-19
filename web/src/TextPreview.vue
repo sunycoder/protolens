@@ -1,18 +1,19 @@
 <script setup lang="ts">
+import { TEXT_PREVIEW_CHUNK } from "./constants";
 import { onBeforeUnmount, ref, watch } from "vue";
 const props = withDefaults(
   defineProps<{ value: unknown; format?: "json" | "hex" }>(),
   { format: "json" },
 );
 const text = ref("");
-const limit = ref(32768);
+const limit = ref(TEXT_PREVIEW_CHUNK);
 const busy = ref(false);
 const error = ref("");
 let worker: Worker | undefined;
 function formatText() {
   worker?.terminate();
   text.value = "";
-  limit.value = 32768;
+  limit.value = TEXT_PREVIEW_CHUNK;
   busy.value = true;
   error.value = "";
   try {
@@ -54,7 +55,7 @@ onBeforeUnmount(() => {
       {{ error }} <el-button @click="formatText">重试</el-button>
     </p>
     <pre>{{ text.slice(0, limit) }}</pre>
-    <el-button v-if="text.length > limit" @click="limit += 32768"
+    <el-button v-if="text.length > limit" @click="limit += TEXT_PREVIEW_CHUNK"
       >继续展示 32K 字符（已展示 {{ limit }} / {{ text.length }}）</el-button
     >
   </div>

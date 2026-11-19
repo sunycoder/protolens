@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.lashouwan.protolens.config.AnalyzerLaunchOptions;
 import com.lashouwan.protolens.config.CaptureTargets;
+import com.lashouwan.protolens.constant.NetworkConstants;
 import com.lashouwan.protolens.enums.CollectorState;
 
 import org.slf4j.Logger;
@@ -90,7 +91,7 @@ public final class CollectorProcess implements AutoCloseable {
                 new ProcessBuilder(
                         binary.toString(),
                         "--listen-host",
-                        "127.0.0.1",
+                        NetworkConstants.LOOPBACK_HOST,
                         "--listen-port",
                         "" + port,
                         "--allow-hosts",
@@ -106,7 +107,8 @@ public final class CollectorProcess implements AutoCloseable {
         builder.directory(options.moduleRoot().toFile())
                 .redirectErrorStream(true)
                 .redirectOutput(ProcessBuilder.Redirect.appendTo(log.toFile()));
-        builder.environment().put("PROTOLENS_ORIGIN", "http://127.0.0.1:" + backendPort);
+        builder.environment()
+                .put("PROTOLENS_ORIGIN", NetworkConstants.HTTP_LOOPBACK_PREFIX + backendPort);
         ObjectMapper mapper = new ObjectMapper();
         builder.environment()
                 .put("PROTOLENS_CAPTURE_HOSTS", mapper.writeValueAsString(targets.hosts()));
@@ -139,7 +141,7 @@ public final class CollectorProcess implements AutoCloseable {
 
     private boolean listening() {
         try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress("127.0.0.1", port), 150);
+            socket.connect(new InetSocketAddress(NetworkConstants.LOOPBACK_HOST, port), 150);
             return true;
         } catch (IOException ignored) {
             return false;

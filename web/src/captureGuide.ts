@@ -1,18 +1,22 @@
+import { OperatingSystem } from "./domain.ts";
+import { MAX_PORT } from "./constants.ts";
 /** 使用后端运行身份选择说明，不能根据自动代理支持与否猜测操作系统。 */
-export type GuidePlatform = "windows" | "macos" | "linux";
+export type GuidePlatform = OperatingSystem;
 export const platformLabels: Record<GuidePlatform, string> = {
   windows: "Windows",
   macos: "macOS",
   linux: "Linux",
 };
 export function guidePlatform(value: unknown): GuidePlatform | undefined {
-  return value === "windows" || value === "macos" || value === "linux"
+  return value === OperatingSystem.WINDOWS ||
+    value === OperatingSystem.MACOS ||
+    value === OperatingSystem.LINUX
     ? value
     : undefined;
 }
 export function guidePort(meta: { proxyPort?: number; port?: number }) {
   const port = meta.proxyPort ?? meta.port;
-  return Number.isInteger(port) && port! > 0 && port! <= 65535
+  return Number.isInteger(port) && port! > 0 && port! <= MAX_PORT
     ? port
     : undefined;
 }

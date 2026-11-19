@@ -1,6 +1,8 @@
 package com.lashouwan.protolens.config;
 
+import com.lashouwan.protolens.constant.NetworkConstants;
 import com.lashouwan.protolens.desktop.RuntimePlatform;
+import com.lashouwan.protolens.enums.FrontendMode;
 
 import java.io.IOException;
 import java.net.URI;
@@ -116,29 +118,31 @@ public final class AnalyzerLaunchOptions {
                                 properties,
                                 "analyzer.port",
                                 Integer.toString(config.serverPort())));
-        if (port < 0 || port > 65535) {
+        if (port < 0 || port > NetworkConstants.MAX_PORT) {
             throw new IllegalArgumentException("后端端口必须为 0～65535");
         }
         String explicitWeb = option(arguments, "web-root", properties, "analyzer.web", "");
-        String defaultMode = config.frontendMode();
-        if (defaultMode.equals("auto")) {
-            defaultMode = source && explicitWeb.isBlank() ? "dev" : "static";
+        FrontendMode defaultMode = FrontendMode.fromCode(config.frontendMode());
+        if (defaultMode == FrontendMode.AUTO) {
+            defaultMode = source && explicitWeb.isBlank() ? FrontendMode.DEV : FrontendMode.STATIC;
         }
-        String mode = option(arguments, "mode", properties, "analyzer.mode", defaultMode);
-        if (!mode.equals("dev") && !mode.equals("static")) {
+        FrontendMode mode =
+                FrontendMode.fromCode(
+                        option(arguments, "mode", properties, "analyzer.mode", defaultMode.code()));
+        if (mode == FrontendMode.AUTO) {
             throw new IllegalArgumentException("mode 必须是 dev 或 static");
         }
-        if (mode.equals("dev") && !explicitWeb.isBlank()) {
+        if (mode == FrontendMode.DEV && !explicitWeb.isBlank()) {
             throw new IllegalArgumentException("开发模式不能同时指定静态 web-root");
         }
         String origin =
-                mode.equals("dev")
+                mode == FrontendMode.DEV
                         ? option(
                                 arguments,
                                 "dev-origin",
                                 properties,
                                 "analyzer.devOrigin",
-                                "http://127.0.0.1:" + config.frontendPort())
+                                NetworkConstants.HTTP_LOOPBACK_PREFIX + config.frontendPort())
                         : "";
         if (!origin.isBlank()) {
             validateDevOrigin(origin);
@@ -168,7 +172,7 @@ public final class AnalyzerLaunchOptions {
                         properties,
                         "analyzer.openBrowser",
                         Boolean.toString(config.openBrowser()));
-        if (!open.equals("true") && !open.equals("false")) {
+        if (!"true".equals(open) && !"false".equals(open)) {
             throw new IllegalArgumentException("open-browser 必须为 true 或 false");
         }
         if (port == config.collectorPort()
@@ -208,7 +212,7 @@ public final class AnalyzerLaunchOptions {
 
     private static Path distributionRoot(Path location) {
         Path parent = location.toAbsolutePath().getParent();
-        return parent != null && parent.getFileName().toString().equals("lib")
+        return parent != null && "lib".equals(parent.getFileName().toString())
                 ? parent.getParent()
                 : parent;
     }
@@ -239,7 +243,7 @@ public final class AnalyzerLaunchOptions {
             throw new IllegalArgumentException("Vite 地址必须为 http://127.0.0.1:端口");
         }
         URI uri = URI.create(origin);
-        if (uri.getPort() < 1 || uri.getPort() > 65535) {
+        if (uri.getPort() < 1 || uri.getPort() > NetworkConstants.MAX_PORT) {
             throw new IllegalArgumentException("Vite 端口无效");
         }
         return uri;

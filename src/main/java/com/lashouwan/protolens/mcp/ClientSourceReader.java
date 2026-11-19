@@ -1,16 +1,22 @@
 package com.lashouwan.protolens.mcp;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.lashouwan.protolens.config.AnalyzerSettingsStore;
+import com.lashouwan.protolens.protocol.ProtocolQueryLimits;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.Locale;
 import java.util.Set;
@@ -36,6 +42,67 @@ public final class ClientSourceReader {
         }
         Path configured = Path.of(value).toRealPath();
         return Files.isDirectory(configured) ? configured : configured.getParent();
+    }
+
+    /** 只读取所选字典对应的协议文件，并对本次读取的完整字节流核验 SHA-256。 历史目录与当前配置不一致、链接越界或源码换版时不展示未经核对的片段；不接受浏览器任意文件路径。 */
+    public ObjectNode protocolSource(JsonNode catalog, int line) throws Exception {
+        if (line < 1 || catalog.path("sha256").asText().isBlank()) {
+            throw new IllegalArgumentException("该定义没有可验证的源码位置或来源指纹");
+        }
+        Path root = root();
+        String sourceRoot = catalog.path("sourceRoot").asText();
+        String sourceFile = catalog.path("sourceFile").asText();
+        if (sourceRoot.isBlank()
+                || sourceFile.isBlank()
+                || !Path.of(sourceRoot).toRealPath().equals(root)) {
+            throw new IllegalArgumentException("字典来源与当前配置的竞品目录不同，无法核对源码；请配置对应版本目录");
+        }
+        Path file = root.resolve(sourceFile).normalize().toRealPath();
+        if (!file.startsWith(root)
+                || !Files.isRegularFile(file)
+                || !"thrift_data.js".equals(file.getFileName().toString())
+                || Files.size(file) > ProtocolQueryLimits.MAX_SOURCE_BYTES) {
+            throw new IllegalArgumentException("只允许读取已配置目录内不超过 64 MiB 的协议来源文件");
+        }
+        int from = Math.max(1, line - ProtocolQueryLimits.SOURCE_CONTEXT_BEFORE);
+        ObjectNode result =
+                mapper.createObjectNode()
+                        .put("path", sourceFile)
+                        .put("fromLine", from)
+                        .put("targetLine", line);
+        ArrayNode lines = result.putArray("lines");
+        byte[] bytes;
+        try (var input = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+            bytes = input.readNBytes(ProtocolQueryLimits.MAX_SOURCE_BYTES + 1);
+        }
+        if (bytes.length > ProtocolQueryLimits.MAX_SOURCE_BYTES) {
+            throw new IllegalArgumentException("读取中的协议来源文件超过 64 MiB");
+        }
+        if (!catalog.path("sha256")
+                .asText()
+                .equals(
+                        HexFormat.of()
+                                .formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)))) {
+            throw new IllegalArgumentException("磁盘源码与所选字典指纹不一致，未展示可能属于其他版本的源码");
+        }
+        int number = 0;
+        try (var input = new ByteArrayInputStream(bytes);
+                var reader =
+                        new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8))) {
+            String text;
+            while ((text = reader.readLine()) != null) {
+                number++;
+                if (number >= from && lines.size() < ProtocolQueryLimits.SOURCE_CONTEXT_LINES) {
+                    lines.addObject()
+                            .put("line", number)
+                            .put("text", clip(text))
+                            .put("lineTruncated", text.length() > McpLimits.MAX_LINE_CHARS);
+                }
+            }
+        }
+        return result.put("verified", true)
+                .put("hasMore", number > from + lines.size() - 1)
+                .put("note", "仅展示定义附近源码；长行按展示预算截断");
     }
 
     /** 有界逐行读取，不因一行打包脚本特别长而一次返回整个文件。 */

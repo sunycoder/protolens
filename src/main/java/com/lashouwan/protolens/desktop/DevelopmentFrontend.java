@@ -3,6 +3,7 @@ package com.lashouwan.protolens.desktop;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lashouwan.protolens.config.AnalyzerLaunchOptions;
+import com.lashouwan.protolens.constant.NetworkConstants;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,7 +35,7 @@ public final class DevelopmentFrontend implements AutoCloseable {
     public void start(AnalyzerLaunchOptions options) throws Exception {
         URI origin = AnalyzerLaunchOptions.validateDevOrigin(options.devOrigin());
         Path web = options.moduleRoot().resolve("web").toRealPath();
-        String backend = "http://127.0.0.1:" + options.port();
+        String backend = NetworkConstants.HTTP_LOOPBACK_PREFIX + options.port();
         if (ready(origin, web, backend)) {
             logger.info("复用前端开发服务 origin:{} source:{}", origin, web);
             return;
@@ -50,7 +51,7 @@ public final class DevelopmentFrontend implements AutoCloseable {
                         "node",
                         vite.toString(),
                         "--host",
-                        "127.0.0.1",
+                        NetworkConstants.LOOPBACK_HOST,
                         "--port",
                         Integer.toString(origin.getPort()),
                         "--strictPort");

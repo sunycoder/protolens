@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { JSON_CHILD_PAGE_SIZE } from "./constants";
 import { computed, ref, watch } from "vue";
 import { pointerChild } from "./analysisWorkspace";
 import JsonScalar from "./JsonScalar.vue";
@@ -20,11 +21,11 @@ const containsMatch = computed(() =>
   ),
 );
 const expanded = ref((props.depth || 0) < 1);
-const limit = ref(100);
+const limit = ref<number>(JSON_CHILD_PAGE_SIZE);
 watch(
   () => props.value,
   () => {
-    limit.value = 100;
+    limit.value = JSON_CHILD_PAGE_SIZE;
     expanded.value = (props.depth || 0) < 1 || !!containsMatch.value;
   },
   { immediate: true },
@@ -86,10 +87,9 @@ const visibleKeys = computed(() =>
     <button
       v-if="expanded && count > limit"
       class="json-more"
-      @click="limit += 100"
+      @click="limit += JSON_CHILD_PAGE_SIZE"
     >
-      继续展开 100 项（还有
-      {{ count - limit }} 项）
+      继续展开 {{ JSON_CHILD_PAGE_SIZE }} 项（还有 {{ count - limit }} 项）
     </button>
   </details>
   <div

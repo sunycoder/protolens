@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { LOOPBACK_HOST } from "./constants";
 import { computed, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { api } from "./types";
@@ -43,7 +44,7 @@ const downloadedPath = ref("");
 let requestVersion = 0;
 const hostPlatform = computed(() => guidePlatform(meta.value.platform));
 const port = computed(() => guidePort(meta.value));
-const host = computed(() => meta.value.proxyHost || "127.0.0.1");
+const host = computed(() => meta.value.proxyHost || LOOPBACK_HOST);
 const commands = computed(() =>
   linuxCertificateCommands(downloadedPath.value, linuxFamily.value),
 );

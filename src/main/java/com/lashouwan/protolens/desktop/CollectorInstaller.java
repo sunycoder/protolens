@@ -1,5 +1,7 @@
 package com.lashouwan.protolens.desktop;
 
+import com.lashouwan.protolens.enums.OperatingSystem;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -16,7 +18,9 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.time.Duration;
+import java.util.Comparator;
 import java.util.HexFormat;
+import java.util.Locale;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
@@ -61,12 +65,12 @@ public final class CollectorInstaller {
             return executable;
         }
         boolean macBundle =
-                RuntimePlatform.current().os().equals("macos")
-                        && !archive.getPath().toLowerCase(java.util.Locale.ROOT).endsWith(".zip");
+                RuntimePlatform.current().operatingSystem() == OperatingSystem.MACOS
+                        && !archive.getPath().toLowerCase(Locale.ROOT).endsWith(".zip");
         Path bundle =
                 macBundle ? executable.toAbsolutePath().getParent().getParent().getParent() : null;
         if (macBundle
-                && (!bundle.getFileName().toString().equals("mitmproxy.app")
+                && (!"mitmproxy.app".equals(bundle.getFileName().toString())
                         || !bundle.resolve("Contents/MacOS/mitmdump")
                                 .equals(executable.toAbsolutePath()))) {
             throw new IOException("macOS 采集器目标必须保留 mitmproxy.app/Contents/MacOS/mitmdump 结构");
@@ -103,7 +107,7 @@ public final class CollectorInstaller {
                 } catch (AtomicMoveNotSupportedException unsupported) {
                     Files.move(extracted.resolve(executable.getFileName()), executable);
                 }
-                if (!RuntimePlatform.current().os().equals("windows")) {
+                if (RuntimePlatform.current().operatingSystem() != OperatingSystem.WINDOWS) {
                     executable.toFile().setExecutable(true, false);
                 }
                 return executable;
@@ -131,10 +135,14 @@ public final class CollectorInstaller {
             Files.move(staged, destination);
             published = true;
         } catch (IOException failure) {
-            if (hadPrevious) Files.move(backup, destination);
+            if (hadPrevious) {
+                Files.move(backup, destination);
+            }
             throw failure;
         } finally {
-            if (published || !Files.exists(backup)) deleteTree(backupRoot);
+            if (published || !Files.exists(backup)) {
+                deleteTree(backupRoot);
+            }
         }
     }
 
@@ -182,9 +190,8 @@ public final class CollectorInstaller {
     }
 
     private void extractExecutable(Path archive, String name, Path target) throws IOException {
-        boolean zipArchive =
-                this.archive.getPath().toLowerCase(java.util.Locale.ROOT).endsWith(".zip");
-        if (!zipArchive && !RuntimePlatform.current().os().equals("windows")) {
+        boolean zipArchive = this.archive.getPath().toLowerCase(Locale.ROOT).endsWith(".zip");
+        if (!zipArchive && RuntimePlatform.current().operatingSystem() != OperatingSystem.WINDOWS) {
             extractTarGz(archive, name, target);
             return;
         }
@@ -232,16 +239,18 @@ public final class CollectorInstaller {
                                     .findFirst()
                                     .orElseThrow(() -> new IOException("官方归档缺少采集器：" + name));
                     Path output = target.resolve(name);
-                    if (RuntimePlatform.current().os().equals("macos")) {
+                    if (RuntimePlatform.current().operatingSystem() == OperatingSystem.MACOS) {
                         Path bundle = executable.getParent().getParent().getParent();
-                        if (!bundle.getFileName().toString().equals("mitmproxy.app")
+                        if (!"mitmproxy.app".equals(bundle.getFileName().toString())
                                 || !Files.isDirectory(bundle.resolve("Contents/Frameworks"))
                                 || !Files.isDirectory(bundle.resolve("Contents/Resources"))) {
                             throw new IOException("官方归档缺少完整 macOS 采集器应用");
                         }
                         validateNativeExecutable(executable);
                         Path outputBundle = target.resolve("mitmproxy.app");
-                        if (!bundle.equals(outputBundle)) Files.move(bundle, outputBundle);
+                        if (!bundle.equals(outputBundle)) {
+                            Files.move(bundle, outputBundle);
+                        }
                         return;
                     }
                     Files.move(executable, output, StandardCopyOption.REPLACE_EXISTING);
@@ -260,7 +269,7 @@ public final class CollectorInstaller {
         try (InputStream input = Files.newInputStream(file)) {
             byte[] magic = input.readNBytes(4);
             boolean valid =
-                    RuntimePlatform.current().os().equals("linux")
+                    RuntimePlatform.current().operatingSystem() == OperatingSystem.LINUX
                             ? magic.length >= 4
                                     && magic[0] == 0x7f
                                     && magic[1] == 'E'
@@ -275,14 +284,18 @@ public final class CollectorInstaller {
                                                     && magic[1] == (byte) 0xed
                                                     && magic[2] == (byte) 0xfa
                                                     && magic[3] == (byte) 0xcf));
-            if (!valid) throw new IOException("归档中的采集器不是当前平台原生可执行程序");
+            if (!valid) {
+                throw new IOException("归档中的采集器不是当前平台原生可执行程序");
+            }
         }
     }
 
     private static void deleteTree(Path root) throws IOException {
-        if (!Files.exists(root)) return;
+        if (!Files.exists(root)) {
+            return;
+        }
         try (var paths = Files.walk(root)) {
-            paths.sorted(java.util.Comparator.reverseOrder())
+            paths.sorted(Comparator.reverseOrder())
                     .forEach(
                             path -> {
                                 try {

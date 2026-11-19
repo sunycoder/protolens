@@ -1,3 +1,9 @@
+import {
+  DEFAULT_PAGE_SIZE,
+  FIELD_PREVIEW_LENGTH,
+  FIELD_SEARCH_LIMITS,
+  FIELD_COMPARE_LIMITS,
+} from "./constants.ts";
 /** 消息分析使用有界遍历；不把大型消息展开成无上限的 DOM 或对比结果。 */
 export interface FieldMatch {
   path: string;
@@ -18,7 +24,9 @@ export function displayValue(value: unknown): string {
   if (value !== null && typeof value === "object")
     return `{${Object.keys(value).length} 个字段}`;
   const text = JSON.stringify(value) ?? String(value);
-  return text.length > 500 ? text.slice(0, 500) + "…" : text;
+  return text.length > FIELD_PREVIEW_LENGTH
+    ? text.slice(0, FIELD_PREVIEW_LENGTH) + "…"
+    : text;
 }
 export function findFieldMatches(value: unknown, query: string) {
   const keyword = query.trim().toLowerCase();
@@ -26,7 +34,11 @@ export function findFieldMatches(value: unknown, query: string) {
   let visited = 0;
   let truncated = false;
   function visit(node: unknown, path: string, key: string, depth: number) {
-    if (++visited > 10000 || matches.length >= 50 || depth > 32) {
+    if (
+      ++visited > FIELD_SEARCH_LIMITS.nodes ||
+      matches.length >= FIELD_SEARCH_LIMITS.matches ||
+      depth > FIELD_SEARCH_LIMITS.depth
+    ) {
       truncated = true;
       return;
     }
@@ -39,7 +51,10 @@ export function findFieldMatches(value: unknown, query: string) {
     if (container)
       for (const childKey in node as Record<string, unknown>) {
         if (!Object.hasOwn(node, childKey)) continue;
-        if (visited >= 10000 || matches.length >= 50) {
+        if (
+          visited >= FIELD_SEARCH_LIMITS.nodes ||
+          matches.length >= FIELD_SEARCH_LIMITS.matches
+        ) {
           truncated = true;
           break;
         }
@@ -62,7 +77,11 @@ export function compareFields(before: unknown, after: unknown, arrayKey = "") {
   let visited = 0;
   let truncated = false;
   function visit(a: unknown, b: unknown, path: string, depth: number) {
-    if (++visited > 20000 || changes.length >= 500 || depth > 32) {
+    if (
+      ++visited > FIELD_COMPARE_LIMITS.nodes ||
+      changes.length >= FIELD_COMPARE_LIMITS.changes ||
+      depth > FIELD_COMPARE_LIMITS.depth
+    ) {
       truncated = true;
       return;
     }
@@ -70,7 +89,7 @@ export function compareFields(before: unknown, after: unknown, arrayKey = "") {
     const aObject = a !== null && typeof a === "object";
     const bObject = b !== null && typeof b === "object";
     if (arrayKey && Array.isArray(a) && Array.isArray(b)) {
-      if (a.length + b.length > 20000 - visited) {
+      if (a.length + b.length > FIELD_COMPARE_LIMITS.nodes - visited) {
         truncated = true;
         return;
       }
@@ -100,7 +119,10 @@ export function compareFields(before: unknown, after: unknown, arrayKey = "") {
         right = index(b);
       if (left && right) {
         for (const [key, value] of left) {
-          if (visited >= 20000 || changes.length >= 500) {
+          if (
+            visited >= FIELD_COMPARE_LIMITS.nodes ||
+            changes.length >= FIELD_COMPARE_LIMITS.changes
+          ) {
             truncated = true;
             break;
           }
@@ -113,7 +135,10 @@ export function compareFields(before: unknown, after: unknown, arrayKey = "") {
         }
         for (const [key, value] of right) {
           if (left.has(key)) continue;
-          if (visited >= 20000 || changes.length >= 500) {
+          if (
+            visited >= FIELD_COMPARE_LIMITS.nodes ||
+            changes.length >= FIELD_COMPARE_LIMITS.changes
+          ) {
             truncated = true;
             break;
           }
@@ -126,7 +151,7 @@ export function compareFields(before: unknown, after: unknown, arrayKey = "") {
         }
         return;
       }
-      if (warnings.length < 10)
+      if (warnings.length < FIELD_COMPARE_LIMITS.warnings)
         warnings.push(
           `${path || "/"}：对齐字段缺失、重复或不是字符串/数字，已回退按位置比较`,
         );
@@ -136,7 +161,10 @@ export function compareFields(before: unknown, after: unknown, arrayKey = "") {
       const right = b as Record<string, unknown>;
       for (const key in left) {
         if (!Object.hasOwn(left, key)) continue;
-        if (visited >= 20000 || changes.length >= 500) {
+        if (
+          visited >= FIELD_COMPARE_LIMITS.nodes ||
+          changes.length >= FIELD_COMPARE_LIMITS.changes
+        ) {
           truncated = true;
           break;
         }
@@ -144,7 +172,10 @@ export function compareFields(before: unknown, after: unknown, arrayKey = "") {
       }
       for (const key in right) {
         if (!Object.hasOwn(right, key) || Object.hasOwn(left, key)) continue;
-        if (visited >= 20000 || changes.length >= 500) {
+        if (
+          visited >= FIELD_COMPARE_LIMITS.nodes ||
+          changes.length >= FIELD_COMPARE_LIMITS.changes
+        ) {
           truncated = true;
           break;
         }
@@ -164,7 +195,10 @@ export function compareFields(before: unknown, after: unknown, arrayKey = "") {
 }
 
 /** 页码依据实际匹配条数，不依赖原始消息编号是否连续。 */
-export function pageContaining(precedingCount: number, pageSize = 100) {
+export function pageContaining(
+  precedingCount: number,
+  pageSize: number = DEFAULT_PAGE_SIZE,
+) {
   return Math.max(1, Math.ceil(precedingCount / pageSize));
 }
 
@@ -174,7 +208,7 @@ export function neighbourPage(
   rowCount: number,
   total: number,
   delta: number,
-  pageSize = 100,
+  pageSize: number = DEFAULT_PAGE_SIZE,
   offset = (page - 1) * pageSize,
 ) {
   if (position < 0 || rowCount === 0) return undefined;

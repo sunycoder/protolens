@@ -15,6 +15,7 @@ import java.util.Map;
 /** 静态协议字典快照；竞品代码只由离线提取器读取，服务不执行任何客户端脚本。 */
 public final class ProtocolCatalog {
     private volatile JsonNode document;
+    private volatile ProtocolQueryIndex queryIndex;
 
     public ProtocolCatalog(JsonNode document) {
         if (document.path("schemaVersion").asInt() != 1
@@ -27,6 +28,15 @@ public final class ProtocolCatalog {
 
     public void replace(JsonNode replacement) {
         document = new ProtocolCatalog(replacement).snapshot();
+    }
+
+    /** 仅首次查询构建索引。索引绑定读取时的同一份文档，换版不影响已经开始的查询。 */
+    public synchronized ProtocolQueryIndex queryIndex(ObjectMapper mapper) {
+        JsonNode current = document;
+        if (queryIndex == null || !queryIndex.belongsTo(current)) {
+            queryIndex = new ProtocolQueryIndex(current, mapper);
+        }
+        return queryIndex;
     }
 
     /** 字典不存在时保留导入能力，但消息明确标为未映射，不猜测名称和字段。 */

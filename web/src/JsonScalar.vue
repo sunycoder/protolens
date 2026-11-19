@@ -1,14 +1,15 @@
 <script setup lang="ts">
+import { SCALAR_PREVIEW_LENGTH, SCALAR_EXPANSION_CHUNK } from "./constants";
 import { computed, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 const props = defineProps<{ value: unknown }>();
-const limit = ref(240);
+const limit = ref(SCALAR_PREVIEW_LENGTH);
 const text = computed(() => JSON.stringify(props.value) ?? String(props.value));
 const visible = computed(() => text.value.slice(0, limit.value));
 watch(
   () => props.value,
   () => {
-    limit.value = 240;
+    limit.value = SCALAR_PREVIEW_LENGTH;
   },
 );
 async function copyValue() {
@@ -33,14 +34,14 @@ async function copyValue() {
     <button
       v-if="text.length > limit"
       class="json-value-action"
-      @click.stop="limit += 4096"
+      @click.stop="limit += SCALAR_EXPANSION_CHUNK"
     >
-      {{ limit === 240 ? "展开值" : "继续展开" }}
+      {{ limit === SCALAR_PREVIEW_LENGTH ? "展开值" : "继续展开" }}
     </button>
     <button
-      v-if="limit > 240"
+      v-if="limit > SCALAR_PREVIEW_LENGTH"
       class="json-value-action"
-      @click.stop="limit = 240"
+      @click.stop="limit = SCALAR_PREVIEW_LENGTH"
     >
       收起值
     </button>

@@ -95,7 +95,7 @@ public final class LiveCaptureService implements AutoCloseable {
 
     /** 停止默认只冻结临时缓存；显式保存失败时记录仍可在页面逐份重试，不伪报保存成功。 */
     public synchronized ObjectNode stop(boolean save, String name) throws IOException {
-        if (name == null || name.length() > 100) {
+        if (name == null || name.length() > AnalyzerLimits.MAX_CAPTURE_NAME_LENGTH) {
             throw new IllegalArgumentException("记录名称不能超过 100 字");
         }
         enabled = false;
@@ -239,11 +239,12 @@ public final class LiveCaptureService implements AutoCloseable {
         }
         if (type == CaptureEventType.OPEN) {
             String endpoint = event.path("endpoint").asText();
-            if (endpoint.length() > 2048
+            if (endpoint.length() > AnalyzerLimits.MAX_LIVE_ENDPOINT_LENGTH
                     || !(endpoint.startsWith("https://") || endpoint.startsWith("http://"))) {
                 throw new IllegalArgumentException("连接地址无效");
             }
-            if (event.path("extensions").asText().length() > 1024) {
+            if (event.path("extensions").asText().length()
+                    > AnalyzerLimits.MAX_WEBSOCKET_EXTENSIONS_LENGTH) {
                 throw new IllegalArgumentException("扩展头过长");
             }
         }
@@ -259,11 +260,13 @@ public final class LiveCaptureService implements AutoCloseable {
             if (bytes.length < 2 || bytes.length > AnalyzerLimits.MAX_MESSAGE_BYTES) {
                 throw new IllegalArgumentException("帧长度无效");
             }
-            if (event.path("time").asText().length() > 100) {
+            if (event.path("time").asText().length() > AnalyzerLimits.MAX_EVENT_TIME_LENGTH) {
                 throw new IllegalArgumentException("时间格式过长");
             }
         }
-        if (type == CaptureEventType.ERROR && event.path("message").asText().length() > 2048) {
+        if (type == CaptureEventType.ERROR
+                && event.path("message").asText().length()
+                        > AnalyzerLimits.MAX_CAPTURE_ERROR_LENGTH) {
             throw new IllegalArgumentException("诊断过长");
         }
     }

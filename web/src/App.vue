@@ -1,5 +1,15 @@
 <script setup lang="ts">
 import {
+  DEFAULT_PAGE_SIZE,
+  MAX_CAPTURE_NAME_LENGTH,
+  MAX_OPERATION_CONTEXT_LENGTH,
+  CACHE_BUDGET,
+  MAX_UPLOAD_BYTES,
+  MESSAGE_REQUEST_TIMEOUT_MS,
+  DETAIL_REQUEST_TIMEOUT_MS,
+} from "./constants";
+import { IdentityState, DecodeStatus, MessageDirection } from "./domain";
+import {
   computed,
   nextTick,
   onBeforeUnmount,
@@ -20,6 +30,11 @@ import MessageComparison from "./MessageComparison.vue";
 import HighlightedText from "./HighlightedText.vue";
 import MessageRowActions from "./MessageRowActions.vue";
 import ProtocolOverview from "./ProtocolOverview.vue";
+import ProtocolQueryPanel from "./ProtocolQueryPanel.vue";
+import {
+  protocolMessageQuery,
+  type ProtocolQueryTarget,
+} from "./protocolQuery";
 import TextPreview from "./TextPreview.vue";
 import { useQueryResults } from "./useQueryResults";
 import { useMessageSelection } from "./useMessageSelection";
@@ -221,8 +236,8 @@ const settings = ref({
   competitorPath: "",
   protocolFile: "",
   loadedProtocolFile: "",
-  maxMessages: 10000,
-  maxCacheMiB: 64,
+  maxMessages: CACHE_BUDGET.defaultMessages,
+  maxCacheMiB: CACHE_BUDGET.defaultMiB,
   collectorPort: 18888,
   autoStartCollector: true,
   catalogError: "",
@@ -390,7 +405,8 @@ async function saveCapture() {
       {
         inputValue: capture.value.name,
         inputValidator: (value) =>
-          (!!value?.trim() && value.length <= 100) || "请输入 1～100 字名称",
+          (!!value?.trim() && value.length <= MAX_CAPTURE_NAME_LENGTH) ||
+          "请输入 1～100 字名称",
       },
     );
     capture.value = await post<Capture>(
@@ -499,6 +515,42 @@ async function freezeOperation() {
   } finally {
     busy.value = false;
   }
+}
+const mainWorkspace = ref<"captures" | "catalog">("captures");
+const protocolQueryTarget = shallowRef<ProtocolQueryTarget>();
+let protocolQuerySequence = 0;
+function openProtocolQuery(fromMessage = false) {
+  pauseListForInteraction();
+  if (
+    fromMessage &&
+    selected.value?.protocolId !== undefined &&
+    capture.value
+  ) {
+    protocolQueryTarget.value = {
+      key: String(selected.value.protocolId),
+      captureId: capture.value.id,
+      fieldPath: focusedField.value || "",
+      sequence: ++protocolQuerySequence,
+    };
+  } else if (!protocolQueryTarget.value) {
+    protocolQueryTarget.value = {
+      captureId: capture.value?.id || "",
+      sequence: ++protocolQuerySequence,
+    };
+  }
+  mainWorkspace.value = "catalog";
+}
+async function showProtocolMessages(value: {
+  captureId: string;
+  protocolId: number;
+}) {
+  if (capture.value?.id !== value.captureId) {
+    ElMessage.warning("当前记录已变化，请重新选择记录字典后查看消息");
+    return;
+  }
+  await quickQuery(protocolMessageQuery(value.protocolId));
+  if (!queryError.value && capture.value?.id === value.captureId)
+    mainWorkspace.value = "captures";
 }
 const workspaceView = ref<"messages" | "protocols">("messages");
 watch(workspaceView, (view) => {
@@ -624,7 +676,8 @@ async function saveCurrentSnapshot() {
       {
         inputValue: source.name.slice(0, 70) + " · 快照",
         inputValidator: (value) =>
-          (!!value?.trim() && value.length <= 100) || "请输入 1～100 字名称",
+          (!!value?.trim() && value.length <= MAX_CAPTURE_NAME_LENGTH) ||
+          "请输入 1～100 字名称",
       },
     );
     snapshotBusy.value = true;
@@ -867,7 +920,7 @@ const hasPrevious = computed(
       rows.value.length,
       total.value,
       -1,
-      100,
+      DEFAULT_PAGE_SIZE,
       pageOffset.value,
     ),
 );
@@ -879,7 +932,7 @@ const hasNext = computed(
       rows.value.length,
       total.value,
       1,
-      100,
+      DEFAULT_PAGE_SIZE,
       pageOffset.value,
     ),
 );
@@ -983,6 +1036,7 @@ async function resetLayout() {
   ElMessage.success("已恢复默认布局，消息、查询条件和选中行已保留");
 }
 function handleWorkspaceKey(event: KeyboardEvent) {
+  if (mainWorkspace.value !== "captures") return;
   const target = event.target as HTMLElement | null;
   const editing =
     !!target?.isContentEditable ||
@@ -1122,10 +1176,10 @@ const detailMetadata = computed(() => {
   return metadata;
 });
 const statusText: Record<string, string> = {
-  DECODED: "已解码",
-  PARTIAL: "部分解码",
-  FAILED: "解码失败",
-  UNMAPPED: "未映射",
+  [DecodeStatus.DECODED]: "已解码",
+  [DecodeStatus.PARTIAL]: "部分解码",
+  [DecodeStatus.FAILED]: "解码失败",
+  [DecodeStatus.UNMAPPED]: "未映射",
 };
 function failure(error: unknown) {
   errorText.value = error instanceof Error ? error.message : String(error);
@@ -1284,7 +1338,7 @@ async function loadMessages(
   const timer = setTimeout(() => {
     if (request.current())
       cancelQuery("查询超过 30 秒，已停止等待；保留上次结果，可重试");
-  }, 30000);
+  }, MESSAGE_REQUEST_TIMEOUT_MS);
   const params = new URLSearchParams({
     q: query.q,
     protocolId: query.protocolId,
@@ -1296,8 +1350,8 @@ async function loadMessages(
     status: query.status,
     connection: query.connection,
     hideHeartbeat: String(query.hideHeartbeat),
-    offset: String((requestedPage - 1) * 100),
-    limit: "100",
+    offset: String((requestedPage - 1) * DEFAULT_PAGE_SIZE),
+    limit: String(DEFAULT_PAGE_SIZE),
     tail: String(tail),
   });
   if (query.range) {
@@ -1329,8 +1383,8 @@ async function loadMessages(
     displayedQuery.value = query;
     rows.value = reconcileRows(rows.value, result.items);
     total.value = result.total;
-    pageOffset.value = result.offset ?? (requestedPage - 1) * 100;
-    displayedPage.value = Math.floor(pageOffset.value / 100) + 1;
+    pageOffset.value = result.offset ?? (requestedPage - 1) * DEFAULT_PAGE_SIZE;
+    displayedPage.value = Math.floor(pageOffset.value / DEFAULT_PAGE_SIZE) + 1;
     page.value = displayedPage.value;
     displayedAt.value = new Date().toLocaleTimeString();
     capture.value = result.capture;
@@ -1472,7 +1526,7 @@ async function openCapture(item: Capture, restore?: ReadingPlace) {
     if (capture.value?.id !== item.id || queryError.value) return;
     if (!rows.value.length && total.value > 0) {
       await loadMessages(false, false, {
-        page: Math.max(1, Math.ceil(total.value / 100)),
+        page: Math.max(1, Math.ceil(total.value / DEFAULT_PAGE_SIZE)),
       });
       ElMessage.warning("原页码已超出保留范围，已定位到最近可用页面");
     }
@@ -1574,7 +1628,7 @@ async function jumpToContext(
   retryAction.value = () => jumpToContext(row, scope);
   const timer = setTimeout(() => {
     if (request.current()) cancelQuery("上下文定位超时，已保留原结果，可重试");
-  }, 15000);
+  }, DETAIL_REQUEST_TIMEOUT_MS);
   try {
     const preceding = await api<Page>(
       `/api/captures/${id}/messages?${contextRankParams(query, row.index)}`,
@@ -1648,7 +1702,7 @@ function browseHistory() {
   page.value =
     (displayedQuery.value?.order || order.value) === "desc"
       ? 1
-      : Math.max(1, Math.ceil(total.value / 100));
+      : Math.max(1, Math.ceil(total.value / DEFAULT_PAGE_SIZE));
   void loadMessages();
 }
 function jumpLatest() {
@@ -1681,7 +1735,7 @@ async function neighbour(delta: number) {
     rows.value.length,
     total.value,
     delta,
-    100,
+    DEFAULT_PAGE_SIZE,
     pageOffset.value,
   );
   if (!next) return;
@@ -1764,7 +1818,7 @@ async function upload(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   if (!file || busy.value) return;
-  if (file.size > 128 * 1024 * 1024) {
+  if (file.size > MAX_UPLOAD_BYTES) {
     failure(new Error("文件超过 128 MiB"));
     input.value = "";
     return;
@@ -1908,7 +1962,10 @@ onMounted(async () => {
 });
 </script>
 <template>
-  <div class="workbench" :class="{ 'focus-mode': focusMode }">
+  <div
+    class="workbench"
+    :class="{ 'focus-mode': focusMode && mainWorkspace === 'captures' }"
+  >
     <header class="topbar">
       <div class="brand">
         <span class="brand-icon">⇄</span>
@@ -1920,8 +1977,18 @@ onMounted(async () => {
         health.ready ? "本机服务已连接" : "连接后端中"
       }}</span>
       <el-tag size="small" effect="plain">Thrift Compact</el-tag>
-      <span class="muted"
-        >{{ health.catalog.messageCount.toLocaleString() }} 条协议</span
+      <el-button
+        text
+        :type="mainWorkspace === 'captures' ? 'primary' : 'default'"
+        @click="mainWorkspace = 'captures'"
+        >抓包分析</el-button
+      >
+      <el-button
+        text
+        :type="mainWorkspace === 'catalog' ? 'primary' : 'default'"
+        @click="openProtocolQuery()"
+        >协议查询 ·
+        {{ health.catalog.messageCount.toLocaleString() }} 条</el-button
       >
       <span
         v-if="settings.serverPort"
@@ -1976,6 +2043,7 @@ onMounted(async () => {
       </div>
     </header>
     <LiveCapturePanel
+      v-show="mainWorkspace === 'captures'"
       ref="livePanel"
       v-model:follow="autoFollow"
       :active-capture-id="capture?.id"
@@ -1994,7 +2062,21 @@ onMounted(async () => {
     >
       协议字典尚未加载。点击右上角“设置 / 协议加载”，填写竞品目录并加载。
     </div>
-    <div class="workspace" :class="{ 'sidebar-hidden': !sidebarVisible }">
+    <ProtocolQueryPanel
+      v-show="mainWorkspace === 'catalog'"
+      :active="mainWorkspace === 'catalog'"
+      :capture="capture"
+      :target="protocolQueryTarget"
+      :catalog-version="health.catalog.sha256"
+      @close="mainWorkspace = 'captures'"
+      @messages="showProtocolMessages"
+      @settings="openSettings"
+    />
+    <div
+      v-show="mainWorkspace === 'captures'"
+      class="workspace"
+      :class="{ 'sidebar-hidden': !sidebarVisible }"
+    >
       <aside v-show="sidebarVisible" class="sidebar">
         <div class="section-heading">
           抓包记录
@@ -2311,9 +2393,11 @@ onMounted(async () => {
                   aria-label="方向筛选"
                   clearable
                   @change="filter"
-                  ><el-option label="发送 CS" value="CS" /><el-option
+                  ><el-option
+                    label="发送 CS"
+                    :value="MessageDirection.CS" /><el-option
                     label="接收 SC"
-                    value="SC"
+                    :value="MessageDirection.SC"
                 /></el-select>
                 <el-select
                   v-model="status"
@@ -2692,7 +2776,11 @@ onMounted(async () => {
                       ><span
                         class="direction"
                         :class="row.direction.toLowerCase()"
-                        >{{ row.direction === "CS" ? "↑ CS" : "↓ SC" }}</span
+                        >{{
+                          row.direction === MessageDirection.CS
+                            ? "↑ CS"
+                            : "↓ SC"
+                        }}</span
                       ></template
                     ></el-table-column
                   >
@@ -2813,7 +2901,7 @@ onMounted(async () => {
                   <el-pagination
                     v-else
                     :current-page="displayedPage"
-                    :page-size="100"
+                    :page-size="DEFAULT_PAGE_SIZE"
                     :total="total"
                     layout="total, prev, pager, next"
                     size="small"
@@ -2849,7 +2937,14 @@ onMounted(async () => {
                     {{ selected.protocolId ?? "未知" }} ·
                     {{ selected.direction }} ·
                     {{ selected.bytes }} 字节（解压后）</span
-                  ><el-button v-if="selected" text size="small" @click="copy"
+                  ><el-button
+                    v-if="selected?.protocolId !== undefined"
+                    text
+                    size="small"
+                    @click="openProtocolQuery(true)"
+                    >查看协议定义</el-button
+                  >
+                  <el-button v-if="selected" text size="small" @click="copy"
                     >复制 JSON</el-button
                   >
                   <el-button
@@ -2958,7 +3053,8 @@ onMounted(async () => {
                     class="muted operation-context"
                   >
                     此消息身份：{{
-                      selected.connectionIdentity.state === "identified"
+                      selected.connectionIdentity.state ===
+                      IdentityState.IDENTIFIED
                         ? `${selected.connectionIdentity.nickname || ""} · 角色 ${selected.connectionIdentity.roleId} · ${selected.connectionIdentity.serverId || "?"}服`
                         : "登录请求，身份待确认"
                     }}（依据 #{{ selected.connectionIdentity.sourceIndex }}
@@ -3138,14 +3234,14 @@ onMounted(async () => {
         ><el-form-item label="操作名称"
           ><el-input
             v-model="operation.name"
-            maxlength="100"
+            :maxlength="MAX_CAPTURE_NAME_LENGTH"
             placeholder="例如：联盟科技捐献一次" /></el-form-item
         ><el-form-item label="操作背景"
           ><el-input
             v-model="operation.context"
             type="textarea"
             :rows="2"
-            maxlength="2000"
+            :maxlength="MAX_OPERATION_CONTEXT_LENGTH"
             placeholder="操作前状态、执行动作和想确认的问题（随快照保存）" /></el-form-item
         ><el-form-item label="起始序号 #"
           ><el-input-number
@@ -3293,15 +3389,15 @@ onMounted(async () => {
             <el-form-item label="每连接消息上限"
               ><el-input-number
                 v-model="settings.maxMessages"
-                :min="100"
-                :max="50000"
+                :min="CACHE_BUDGET.minMessages"
+                :max="CACHE_BUDGET.maxMessages"
                 :step="1000"
             /></el-form-item>
             <el-form-item label="每连接容量 MiB"
               ><el-input-number
                 v-model="settings.maxCacheMiB"
-                :min="1"
-                :max="256"
+                :min="CACHE_BUDGET.minMiB"
+                :max="CACHE_BUDGET.maxMiB"
             /></el-form-item>
           </el-form>
           <p class="muted">

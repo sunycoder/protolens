@@ -6,6 +6,7 @@ import com.lashouwan.protolens.capture.LiveCaptureService;
 import com.lashouwan.protolens.config.AnalyzerLaunchOptions;
 import com.lashouwan.protolens.config.AnalyzerSettingsStore;
 import com.lashouwan.protolens.config.CollectorConfigStore;
+import com.lashouwan.protolens.constant.NetworkConstants;
 import com.lashouwan.protolens.desktop.AnalyzerVersion;
 import com.lashouwan.protolens.desktop.CollectorProcess;
 import com.lashouwan.protolens.desktop.ReleaseAssets;
@@ -85,7 +86,9 @@ public final class SystemController {
                                                         .put(
                                                                 "platform",
                                                                 RuntimePlatform.current().os())
-                                                        .put("proxyHost", "127.0.0.1")
+                                                        .put(
+                                                                "proxyHost",
+                                                                NetworkConstants.LOOPBACK_HOST)
                                                         .put(
                                                                 "proxyPort",
                                                                 options.config().collectorPort())
@@ -167,8 +170,9 @@ public final class SystemController {
                         .connectTimeout(Duration.ofSeconds(10))
                         .build()
                         .send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() / 100 != 2)
+        if (response.statusCode() / 100 != 2) {
             throw new IllegalStateException("GitHub 更新查询失败：HTTP " + response.statusCode());
+        }
         var release = mapper.readTree(response.body());
         String tag = release.path("tag_name").asText("");
         String version = tag.startsWith("v") ? tag.substring(1) : tag;
@@ -194,7 +198,9 @@ public final class SystemController {
             for (int i = 0; i < Math.max(a.length, b.length); i++) {
                 int left = i < a.length ? Integer.parseInt(a[i]) : 0;
                 int right = i < b.length ? Integer.parseInt(b[i]) : 0;
-                if (left != right) return left > right;
+                if (left != right) {
+                    return left > right;
+                }
             }
         } catch (NumberFormatException ignored) {
             return false;
@@ -204,7 +210,7 @@ public final class SystemController {
 
     private ObjectNode settingsSnapshot() {
         ObjectNode result = settings.snapshot().put("catalogError", protocols.lastError());
-        String backend = "http://127.0.0.1:" + port;
+        String backend = NetworkConstants.HTTP_LOOPBACK_PREFIX + port;
         result.put("dataDirectory", options.dataDirectory().toString())
                 .put("openBrowser", options.openBrowser());
         result.put("serverPort", port)
@@ -213,7 +219,9 @@ public final class SystemController {
                         "frontendPort",
                         options.development() ? URI.create(options.devOrigin()).getPort() : port)
                 .put("browserAddress", options.development() ? options.devOrigin() : backend)
-                .put("proxyAddress", "127.0.0.1:" + options.config().collectorPort())
+                .put(
+                        "proxyAddress",
+                        NetworkConstants.LOOPBACK_HOST + ":" + options.config().collectorPort())
                 .put("configFile", options.configFile().toString())
                 .put("configPrecedence", "类默认值 < 配置文件 < JVM 参数 < 命令行参数；页面偏好仅覆盖协议来源和缓存预算");
         return result;

@@ -60,7 +60,9 @@ final class LiveMessageBuffer {
             String protocolId = removed.path("protocolId").asText();
             Deque<ObjectNode> protocolQueue = protocolMessages.get(protocolId);
             protocolQueue.removeFirst();
-            if (protocolQueue.isEmpty()) protocolMessages.remove(protocolId);
+            if (protocolQueue.isEmpty()) {
+                protocolMessages.remove(protocolId);
+            }
             updateCount(removed, -1);
             bytes -= sizes.removeFirst();
             evicted++;
@@ -94,7 +96,9 @@ final class LiveMessageBuffer {
     ArrayNode protocolSnapshot(String protocolId, ObjectMapper mapper) {
         ArrayNode result = mapper.createArrayNode();
         Deque<ObjectNode> matching = protocolMessages.get(protocolId);
-        if (matching != null) matching.forEach(result::add);
+        if (matching != null) {
+            matching.forEach(result::add);
+        }
         return result;
     }
 

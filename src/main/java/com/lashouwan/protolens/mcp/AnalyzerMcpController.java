@@ -3,6 +3,8 @@ package com.lashouwan.protolens.mcp;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.lashouwan.protolens.constant.NetworkConstants;
+import com.lashouwan.protolens.enums.JsonRpcError;
 import com.lashouwan.protolens.http.AnalyzerHttpSupport;
 
 import io.vertx.core.Vertx;
@@ -12,15 +14,19 @@ import io.vertx.ext.web.handler.BodyHandler;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /** 本机无状态 Streamable HTTP MCP 入口；JSON响应，无主动SSE，无会话缓存，复用现有回环来源校验。 */
 public final class AnalyzerMcpController {
+    private static final String JSON_RPC_VERSION = "2.0";
+    private static final Pattern TOKEN_FORMAT = Pattern.compile("[a-zA-Z0-9-]+");
     private static final String VERSION = "2025-06-18";
     private static final Set<String> VERSIONS = Set.of("2025-03-26", VERSION);
     private final Vertx vertx;
@@ -45,12 +51,14 @@ public final class AnalyzerMcpController {
             try {
                 Files.writeString(
                         file, generated, StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW);
-            } catch (java.nio.file.FileAlreadyExistsException ignored) {
+            } catch (FileAlreadyExistsException ignored) {
                 /* 其他启动实例已创建，读取相同本机配置。 */
             }
         }
         token = Files.readString(file, StandardCharsets.UTF_8).trim();
-        if (token.length() < 32 || token.length() > 200 || !token.matches("[a-zA-Z0-9-]+")) {
+        if (token.length() < McpLimits.MIN_TOKEN_LENGTH
+                || token.length() > McpLimits.MAX_TOKEN_LENGTH
+                || !TOKEN_FORMAT.matcher(token).matches()) {
             throw new IOException("本机MCP凭证格式无效，请检查 data/mcp-access.key");
         }
     }
@@ -90,7 +98,7 @@ public final class AnalyzerMcpController {
     }
 
     private ObjectNode connection() {
-        String url = "http://127.0.0.1:" + port + "/mcp";
+        String url = NetworkConstants.HTTP_LOOPBACK_PREFIX + port + "/mcp";
         ObjectNode result =
                 mapper.createObjectNode()
                         .put("url", url)
@@ -132,17 +140,20 @@ public final class AnalyzerMcpController {
         try {
             request = mapper.readTree(context.body().buffer().getBytes());
         } catch (Exception failure) {
-            send(context, 400, error(mapper.nullNode(), -32700, "JSON解析失败"));
+            send(context, 400, error(mapper.nullNode(), JsonRpcError.PARSE_ERROR, "JSON解析失败"));
             return;
         }
         if (request == null
                 || !request.isObject()
-                || !request.path("jsonrpc").asText().equals("2.0")
+                || !JSON_RPC_VERSION.equals(request.path("jsonrpc").asText())
                 || !request.path("method").isTextual()
                 || (request.has("id")
                         && !(request.path("id").isTextual()
                                 || request.path("id").isIntegralNumber()))) {
-            send(context, 400, error(mapper.nullNode(), -32600, "无效JSON-RPC请求，不支持批次"));
+            send(
+                    context,
+                    400,
+                    error(mapper.nullNode(), JsonRpcError.INVALID_REQUEST, "无效JSON-RPC请求，不支持批次"));
             return;
         }
         if (!request.has("id")) {
@@ -152,12 +163,17 @@ public final class AnalyzerMcpController {
         JsonNode id = request.get("id");
         JsonNode params = request.path("params");
         if (!params.isMissingNode() && !params.isObject()) {
-            send(context, 200, error(id, -32602, "params须为对象"));
+            send(context, 200, error(id, JsonRpcError.INVALID_PARAMS, "params须为对象"));
             return;
         }
         vertx.executeBlocking(() -> dispatch(request.path("method").asText(), params, id), false)
                 .onSuccess(result -> send(context, 200, result))
-                .onFailure(failure -> send(context, 200, error(id, -32603, "MCP内部查询失败")));
+                .onFailure(
+                        failure ->
+                                send(
+                                        context,
+                                        200,
+                                        error(id, JsonRpcError.INTERNAL_ERROR, "MCP内部查询失败")));
     }
 
     private ObjectNode dispatch(String method, JsonNode params, JsonNode id) {
@@ -188,7 +204,7 @@ public final class AnalyzerMcpController {
             }
             case "tools/call" -> {
                 if (!params.path("name").isTextual()) {
-                    return error(id, -32602, "缺少工具name");
+                    return error(id, JsonRpcError.INVALID_PARAMS, "缺少工具name");
                 }
                 result =
                         tools.call(
@@ -207,7 +223,7 @@ public final class AnalyzerMcpController {
             }
             case "prompts/get" -> {
                 if (!"analyze_game_interaction".equals(params.path("name").asText())) {
-                    return error(id, -32602, "未知提示词");
+                    return error(id, JsonRpcError.INVALID_PARAMS, "未知提示词");
                 }
                 ObjectNode prompt = mapper.createObjectNode().put("description", "游戏交互证据分析");
                 prompt.putArray("messages")
@@ -219,19 +235,19 @@ public final class AnalyzerMcpController {
                 result = prompt;
             }
             default -> {
-                return error(id, -32601, "不支持的方法：" + method);
+                return error(id, JsonRpcError.METHOD_NOT_FOUND, "不支持的方法：" + method);
             }
         }
-        ObjectNode response = mapper.createObjectNode().put("jsonrpc", "2.0");
+        ObjectNode response = mapper.createObjectNode().put("jsonrpc", JSON_RPC_VERSION);
         response.set("id", id);
         response.set("result", result);
         return response;
     }
 
-    private ObjectNode error(JsonNode id, int code, String message) {
-        ObjectNode response = mapper.createObjectNode().put("jsonrpc", "2.0");
+    private ObjectNode error(JsonNode id, JsonRpcError error, String message) {
+        ObjectNode response = mapper.createObjectNode().put("jsonrpc", JSON_RPC_VERSION);
         response.set("id", id);
-        response.putObject("error").put("code", code).put("message", message);
+        response.putObject("error").put("code", error.code()).put("message", message);
         return response;
     }
 

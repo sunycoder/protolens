@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { CollectorState } from "./domain";
+import { LIVE_REFRESH_DEBOUNCE_MS, MAX_CAPTURE_NAME_LENGTH } from "./constants";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { api, post } from "./types";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -61,8 +63,13 @@ const busy = ref(false);
 const stopDialog = ref(false);
 const saveOnStop = ref(false);
 const recordName = ref("");
-const collector = ref({
-  state: "NOT_STARTED",
+const collector = ref<{
+  state: CollectorState;
+  message: string;
+  port: number;
+  certificateFile: string;
+}>({
+  state: CollectorState.NOT_STARTED,
   message: "",
   port: 0,
   certificateFile: "",
@@ -79,12 +86,12 @@ const nextStep = computed(() => {
       title: "页面正在连接后端",
       hint: "连接恢复后会自动更新；长时间未恢复时请检查后端是否运行。",
     };
-  if (collector.value.state === "PREPARING")
+  if (collector.value.state === CollectorState.PREPARING)
     return {
       title: "正在准备采集器",
       hint: "首次准备可能需要下载，完成后再开始采集。",
     };
-  if (collector.value.state === "FAILED")
+  if (collector.value.state === CollectorState.FAILED)
     return {
       title: "采集器未就绪",
       hint: collector.value.message || "展开技术状态查看原因，修复后刷新诊断。",
@@ -190,7 +197,7 @@ function update(status: LiveStatus) {
       const changedIds = [...pending];
       pending.clear();
       emit("changed", state.value.connections, changedIds);
-    }, 1000);
+    }, LIVE_REFRESH_DEBOUNCE_MS);
   }
 }
 async function control(action: "start" | "stop") {
@@ -345,7 +352,9 @@ onBeforeUnmount(() => {
           <span class="muted" :title="collector.message"
             >代理 :{{ collector.port }} ·
             {{
-              collector.state === "RUNNING" ? "已随项目启动" : collector.message
+              collector.state === CollectorState.RUNNING
+                ? "已随项目启动"
+                : collector.message
             }}</span
           >
           <span class="muted"
@@ -420,7 +429,7 @@ onBeforeUnmount(() => {
       <el-input
         v-if="saveOnStop"
         v-model="recordName"
-        maxlength="100"
+        :maxlength="MAX_CAPTURE_NAME_LENGTH"
         placeholder="默认使用每条连接开始采集的时间"
       />
       <p class="muted">

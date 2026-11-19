@@ -19,6 +19,48 @@ import java.util.zip.Deflater;
 class PacketDecoderTest {
     private final ObjectMapper mapper = new ObjectMapper();
 
+    /** 固定字节样本独立于枚举，防止 Compact 编号和字典 TType 编号在重构后串用。 */
+    @Test
+    void testAllCompactTypes_ShouldDecodeFixedWireSampleWithoutWarnings() throws Exception {
+        ProtocolCatalog catalog =
+                new ProtocolCatalog(
+                        mapper.readTree(
+                                """
+{"schemaVersion":1,"messages":{"100":{"name":"GcTypes"}},"definitions":{
+  "100":{"1":["yes",2],"2":["no",2],"3":["byte",3],"4":["short",6],
+    "5":["int",8],"6":["long",10],"7":["double",4],"8":["string",11],
+    "9":["list",[15,2]],"10":["set",[14,8]],"11":["map",[13,8,11]],
+    "12":["nested",[12,"Nested"]]},"Nested":{"1":["child",8]}}}
+"""));
+        // 字段依次为 true、false、-2、-2、4、6、1.5、ok、布尔列表、整数集合、Map 和嵌套结构。
+        byte[] bytes =
+                HexFormat.of()
+                        .parseHex(
+                                "111213fe14031508160c17000000000000f83f18026f6b192101021a150e1b01580201781c15120000");
+        var decoder = new CompactThriftDecoder(catalog, mapper, bytes);
+        var body = decoder.decode(100);
+        assertTrue(body.path("yes").asBoolean());
+        assertFalse(body.path("no").asBoolean());
+        assertEquals(-2, body.path("byte").asInt());
+        assertEquals(-2, body.path("short").asInt());
+        assertEquals(4, body.path("int").asInt());
+        assertEquals("6", body.path("long").asText());
+        assertEquals(1.5, body.path("double").asDouble());
+        assertEquals("ok", body.path("string").asText());
+        assertTrue(body.path("list").path(0).asBoolean());
+        assertFalse(body.path("list").path(1).asBoolean());
+        assertEquals(7, body.path("set").path(0).asInt());
+        assertEquals(1, body.path("map").path("$map").path(0).path("key").asInt());
+        assertEquals("x", body.path("map").path("$map").path(0).path("value").asText());
+        assertEquals(9, body.path("nested").path("child").asInt());
+        assertTrue(decoder.warnings().isEmpty());
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        new CompactThriftDecoder(catalog, mapper, HexFormat.of().parseHex("1d00"))
+                                .decode(100));
+    }
+
     /** [11,1] 来自新版客户端 StringKind.BINARY，不可因内容合法 UTF-8 就改为文本。 */
     @Test
     void testExplicitBinaryString_ShouldPreserveBytesWithoutFalseWarning() throws Exception {

@@ -1,5 +1,7 @@
 package com.lashouwan.protolens.http;
 
+import com.lashouwan.protolens.constant.NetworkConstants;
+
 import io.vertx.core.Handler;
 import io.vertx.ext.web.RoutingContext;
 
@@ -22,7 +24,7 @@ public final class LocalAccessGuard implements Handler<RoutingContext> {
     public void handle(RoutingContext context) {
         String host =
                 context.request().authority() == null ? "" : context.request().authority().host();
-        if (!("127.0.0.1".equals(host) || "localhost".equals(host))
+        if (!(NetworkConstants.LOOPBACK_HOST.equals(host) || "localhost".equals(host))
                 || !validOrigin(context.request().getHeader("Origin"))) {
             context.response().setStatusCode(403).end("来源无效");
             return;
@@ -44,7 +46,8 @@ public final class LocalAccessGuard implements Handler<RoutingContext> {
         try {
             URI uri = URI.create(origin);
             return "http".equals(uri.getScheme())
-                    && ("127.0.0.1".equals(uri.getHost()) || "localhost".equals(uri.getHost()))
+                    && (NetworkConstants.LOOPBACK_HOST.equals(uri.getHost())
+                            || "localhost".equals(uri.getHost()))
                     && (uri.getPort() == port || origin.equals(devOrigin))
                     && uri.getRawUserInfo() == null
                     && (uri.getRawPath() == null || uri.getRawPath().isEmpty())

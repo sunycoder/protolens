@@ -3,6 +3,7 @@ package com.lashouwan.protolens.desktop.proxy;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lashouwan.protolens.enums.MacProxyKind;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
@@ -63,8 +64,8 @@ class MacSystemProxyBackendTest {
         assertEquals(
                 MacProxySettings.field(original.values().get("pac"), "URL"),
                 MacProxySettings.field(applied.values().get("pac"), "URL"));
-        assertFalse(applied.enabled("pac"));
-        assertFalse(applied.enabled("discovery"));
+        assertFalse(applied.enabled(MacProxyKind.PAC));
+        assertFalse(applied.enabled(MacProxyKind.DISCOVERY));
         var mapper = new ObjectMapper();
         assertEquals(
                 original.snapshot(),

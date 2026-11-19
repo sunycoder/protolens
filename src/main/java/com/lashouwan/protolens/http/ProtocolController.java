@@ -71,8 +71,8 @@ public final class ProtocolController {
     private Object decode(RoutingContext context) throws Exception {
         JsonNode input = http.body(context);
         String direction = input.path("direction").asText(MessageDirection.CS.name());
-        if (!direction.equals(MessageDirection.CS.name())
-                && !direction.equals(MessageDirection.SC.name())) {
+        if (!MessageDirection.CS.name().equals(direction)
+                && !MessageDirection.SC.name().equals(direction)) {
             throw new IllegalArgumentException("方向必须是 CS 或 SC");
         }
         String hex = input.path("hex").asText().replaceAll("[\\s:-]", "");

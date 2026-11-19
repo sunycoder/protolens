@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.lashouwan.protolens.constant.AnalyzerLimits;
 import com.lashouwan.protolens.enums.CaptureState;
+import com.lashouwan.protolens.enums.ConnectionIdentityState;
 import com.lashouwan.protolens.protocol.ProtocolCatalog;
 
 import java.io.BufferedReader;
@@ -49,12 +50,15 @@ public final class CaptureStore {
     private final Map<String, LiveMessageBuffer> liveBuffers = new HashMap<>();
 
     /** 新建连接使用当前设置；已有连接保留创建时预算。 */
-    private int liveLimit = 10_000;
+    private int liveLimit = AnalyzerLimits.DEFAULT_CACHE_MESSAGES;
 
-    private long liveByteLimit = 64L * 1024 * 1024;
+    private long liveByteLimit = AnalyzerLimits.DEFAULT_CACHE_MIB * AnalyzerLimits.BYTES_PER_MIB;
 
     public synchronized void configureLive(int limit, long bytes) {
-        if (limit < 100 || limit > 50_000 || bytes < 1024 * 1024 || bytes > 256L * 1024 * 1024) {
+        if (limit < AnalyzerLimits.MIN_CACHE_MESSAGES
+                || limit > AnalyzerLimits.MAX_CACHE_MESSAGES
+                || bytes < AnalyzerLimits.MIN_CACHE_MIB * AnalyzerLimits.BYTES_PER_MIB
+                || bytes > AnalyzerLimits.MAX_CACHE_MIB * AnalyzerLimits.BYTES_PER_MIB) {
             throw new IllegalArgumentException("缓存条数需为 100～50000，字节预算需为 1～256 MiB");
         }
         liveLimit = limit;
@@ -93,8 +97,9 @@ public final class CaptureStore {
             ((ObjectNode) node).put("index", index++);
             ObjectNode identity =
                     ConnectionIdentity.observe(node, capture.path("dictionary"), mapper);
-            if (identity != null)
+            if (identity != null) {
                 updateIdentity(capture, identity, node.path("connection").asText());
+            }
         }
         synchronized (this) {
             save(capture);
@@ -120,7 +125,7 @@ public final class CaptureStore {
                         captures.add(summary(load(id)));
                     } else if (Files.isRegularFile(metadata)) {
                         ObjectNode meta = (ObjectNode) mapper.readTree(metadata.toFile());
-                        if (meta.path("liveState").asText().equals(CaptureState.CAPTURING.name())) {
+                        if (CaptureState.CAPTURING.name().equals(meta.path("liveState").asText())) {
                             meta.put("liveState", CaptureState.INTERRUPTED.name());
                         }
                         captures.add(meta);
@@ -191,8 +196,9 @@ public final class CaptureStore {
                                 .put("count", 0)
                                 .put("firstIndex", message.path("index").asInt());
                 groups.put(key, group);
-                if (message.hasNonNull("protocolId"))
+                if (message.hasNonNull("protocolId")) {
                     group.set("protocolId", message.path("protocolId"));
+                }
             }
             group.put("count", group.path("count").asInt() + 1)
                     .put("lastIndex", message.path("index").asInt())
@@ -208,7 +214,9 @@ public final class CaptureStore {
             items.add(distribution.get(index));
         }
         result.put("protocolGroupCount", groups.size())
-                .put("distributionTruncated", groups.size() > 200);
+                .put(
+                        "distributionTruncated",
+                        groups.size() > AnalyzerLimits.MAX_PROTOCOL_OVERVIEW_GROUPS);
         result.put("evidenceScope", "仅当前记录可见的消息；单连接不能证明全服或其他联盟的广播范围");
         return result;
     }
@@ -224,6 +232,41 @@ public final class CaptureStore {
         result.set("catalog", capture.path("catalog").deepCopy());
         result.set("message", capture.path("dictionary").path("messages").path(key).deepCopy());
         result.set("fields", capture.path("dictionary").path("definitions").path(key).deepCopy());
+        return result;
+    }
+
+    /** 查询目录使用记录创建时的字典；复制后在仓库锁外建立索引，不阻塞后续实时消息追加。 */
+    public synchronized JsonNode protocolDictionary(String id) throws IOException {
+        return load(id).path("dictionary").deepCopy();
+    }
+
+    /** 当前记录保留窗口的协议统计；按真实方向分别计数，不应用页面临时筛选。 */
+    public synchronized ObjectNode protocolOccurrences(String id, String key) throws IOException {
+        ObjectNode capture = load(id);
+        int count = 0;
+        int first = -1;
+        int last = -1;
+        ObjectNode directions = mapper.createObjectNode();
+        for (JsonNode message : capture.path("messages")) {
+            if (!key.equals(message.path("protocolId").asText())) {
+                continue;
+            }
+            count++;
+            int index = message.path("index").asInt();
+            if (first < 0) {
+                first = index;
+            }
+            last = index;
+            String direction = message.path("direction").asText("UNKNOWN");
+            directions.put(direction, directions.path(direction).asInt() + 1);
+        }
+        ObjectNode result =
+                mapper.createObjectNode()
+                        .put("count", count)
+                        .put("firstIndex", first)
+                        .put("lastIndex", last)
+                        .put("scope", "本记录当前保留窗口；不应用消息列表筛选，已淘汰消息不计入");
+        result.set("directions", directions);
         return result;
     }
 
@@ -273,9 +316,9 @@ public final class CaptureStore {
             throws IOException {
         ObjectNode source = load(id);
         JsonNode messages = source.path("messages");
-        if (context.length() > 2000
+        if (context.length() > AnalyzerLimits.MAX_OPERATION_CONTEXT_LENGTH
                 || name.isBlank()
-                || name.length() > 100
+                || name.length() > AnalyzerLimits.MAX_CAPTURE_NAME_LENGTH
                 || messages.isEmpty()
                 || from < 0
                 || to < from
@@ -287,7 +330,7 @@ public final class CaptureStore {
         Iterator<Map.Entry<String, JsonNode>> fields = source.fields();
         while (fields.hasNext()) {
             Map.Entry<String, JsonNode> field = fields.next();
-            if (!field.getKey().equals("messages")) {
+            if (!"messages".equals(field.getKey())) {
                 frozen.set(field.getKey(), field.getValue().deepCopy());
             }
         }
@@ -338,11 +381,16 @@ public final class CaptureStore {
             if (identity == null ? !latest.isMissingNode() : !identity.equals(latest)) {
                 frozenConnection.put("note", "");
             }
-            if (identity == null) frozenConnection.remove("identity");
-            else frozenConnection.set("identity", identity.deepCopy());
+            if (identity == null) {
+                frozenConnection.remove("identity");
+            } else {
+                frozenConnection.set("identity", identity.deepCopy());
+            }
             ArrayNode history = mapper.createArrayNode();
             for (JsonNode event : connection.path("identityHistory")) {
-                if (event.path("sourceIndex").asInt() <= to) history.add(event.deepCopy());
+                if (event.path("sourceIndex").asInt() <= to) {
+                    history.add(event.deepCopy());
+                }
             }
             frozenConnection.set("identityHistory", history);
             frozenConnection.put("messages", count);
@@ -386,9 +434,10 @@ public final class CaptureStore {
                             ObjectNode identity =
                                     ConnectionIdentity.observe(
                                             message, restored.path("dictionary"), mapper);
-                            if (identity != null)
+                            if (identity != null) {
                                 updateIdentity(
                                         restored, identity, message.path("connection").asText());
+                            }
                         } else if (index > expected || index < 0) {
                             restored.put("recoveryWarning", "实时日志编号中断，已保留前序完整消息");
                             break;
@@ -401,7 +450,7 @@ public final class CaptureStore {
             }
             restored.put("liveState", CaptureState.INTERRUPTED.name());
         }
-        if (restored.path("liveState").asText().equals(CaptureState.CAPTURING.name())) {
+        if (CaptureState.CAPTURING.name().equals(restored.path("liveState").asText())) {
             restored.put("liveState", CaptureState.INTERRUPTED.name());
         }
         restored.put("continuous", false).put("temporary", false);
@@ -420,8 +469,9 @@ public final class CaptureStore {
                 for (JsonNode saved : savedConnections) {
                     // 只在备注对应的身份证据仍相同时恢复，后续登录不得继承旧账号备注。
                     if (connection.path("id").equals(saved.path("id"))
-                            && connection.path("identity").equals(saved.path("identity")))
+                            && connection.path("identity").equals(saved.path("identity"))) {
                         ((ObjectNode) connection).put("note", saved.path("note").asText());
+                    }
                 }
             }
         }
@@ -433,7 +483,7 @@ public final class CaptureStore {
     public synchronized ObjectNode enableContinuous(String id) throws IOException {
         ObjectNode source = liveCaptures.get(id);
         if (source == null
-                || !source.path("liveState").asText().equals(CaptureState.CAPTURING.name())) {
+                || !CaptureState.CAPTURING.name().equals(source.path("liveState").asText())) {
             throw new IllegalArgumentException("仅可为正在采集的记录启用持续落盘");
         }
         if (source.path("continuous").asBoolean()) {
@@ -503,7 +553,7 @@ public final class CaptureStore {
     public synchronized void appendLive(String id, ObjectNode message) throws IOException {
         ObjectNode capture = liveCaptures.get(id);
         if (capture == null
-                || !capture.path("liveState").asText().equals(CaptureState.CAPTURING.name())) {
+                || !CaptureState.CAPTURING.name().equals(capture.path("liveState").asText())) {
             throw new IllegalArgumentException("实时记录已停止");
         }
         LiveMessageBuffer buffer = liveBuffers.get(id);
@@ -563,11 +613,13 @@ public final class CaptureStore {
                         : mapper.createObjectNode();
         previousValue.remove(List.of("sourceIndex", "sourceProtocol"));
         if (currentValue.equals(previousValue)
-                && !"pending".equals(identity.path("state").asText())) {
+                && !ConnectionIdentityState.PENDING
+                        .code()
+                        .equals(identity.path("state").asText())) {
             return;
         }
         // 登录或角色变更时解除旧备注，避免旧账号的“主号”别名跟随新账号。
-        if ("pending".equals(identity.path("state").asText())
+        if (ConnectionIdentityState.PENDING.code().equals(identity.path("state").asText())
                 || (!previous.path("roleId").asText().isEmpty()
                         && !previous.path("roleId")
                                 .asText()
@@ -577,7 +629,7 @@ public final class CaptureStore {
         connection.set("identity", identity);
         ArrayNode history = connection.withArray("identityHistory");
         history.add(identity.deepCopy());
-        if (history.size() > 256) {
+        if (history.size() > AnalyzerLimits.MAX_IDENTITY_HISTORY) {
             history.remove(0);
             connection.put("identityHistoryTruncated", true);
         }
@@ -623,7 +675,9 @@ public final class CaptureStore {
     public synchronized ObjectNode annotateConnection(
             String id, String connectionId, String note, JsonNode expectedIdentity)
             throws IOException {
-        if (note == null || note.length() > 40 || note.chars().anyMatch(Character::isISOControl)) {
+        if (note == null
+                || note.length() > AnalyzerLimits.MAX_CONNECTION_NOTE_LENGTH
+                || note.chars().anyMatch(Character::isISOControl)) {
             throw new IllegalArgumentException("连接备注最多 40 字，不能包含换行或控制字符");
         }
         ObjectNode source = liveCaptures.containsKey(id) ? liveCaptures.get(id) : load(id);
@@ -692,7 +746,7 @@ public final class CaptureStore {
     /** 仅保存已停止的临时记录；快照发布成功之后才释放内存，失败仍可重试。 */
     public synchronized ObjectNode persistLive(String id, String name) throws IOException {
         ObjectNode capture = load(id).deepCopy();
-        if (capture.path("liveState").asText().equals(CaptureState.CAPTURING.name())) {
+        if (CaptureState.CAPTURING.name().equals(capture.path("liveState").asText())) {
             throw new IllegalArgumentException("请先停止采集再保存记录");
         }
         if (capture.has("diskFirstIndex")) {
@@ -714,11 +768,12 @@ public final class CaptureStore {
                     .put("memoryEvictedCount", capture.path("evictedCount").asLong())
                     .put("evictedCount", archive.path("evictedCount").asLong())
                     .put("diskLastIndex", last);
-            if (archive.has("recoveryWarning"))
+            if (archive.has("recoveryWarning")) {
                 capture.set("recoveryWarning", archive.path("recoveryWarning"));
+            }
         }
         String title = name == null || name.isBlank() ? capture.path("name").asText() : name.trim();
-        if (title.length() > 100) {
+        if (title.length() > AnalyzerLimits.MAX_CAPTURE_NAME_LENGTH) {
             throw new IllegalArgumentException("记录名称不能超过 100 字");
         }
         capture.put("name", title).put("temporary", false);
@@ -758,7 +813,7 @@ public final class CaptureStore {
     public synchronized ObjectNode delete(String id) throws IOException {
         path(id);
         ObjectNode capture = load(id);
-        if (capture.path("liveState").asText().equals(CaptureState.CAPTURING.name())) {
+        if (CaptureState.CAPTURING.name().equals(capture.path("liveState").asText())) {
             throw new IllegalArgumentException("正在采集的记录不能删除，请先停止采集");
         }
         Files.deleteIfExists(directory.resolve(id + ".json"));
@@ -858,8 +913,11 @@ public final class CaptureStore {
             int high = messages.size();
             while (low < high) {
                 int middle = (low + high) >>> 1;
-                if (messages.path(middle).path("index").asInt() < index) low = middle + 1;
-                else high = middle;
+                if (messages.path(middle).path("index").asInt() < index) {
+                    low = middle + 1;
+                } else {
+                    high = middle;
+                }
             }
             message =
                     low < messages.size() && messages.path(low).path("index").asInt() == index
@@ -906,7 +964,7 @@ public final class CaptureStore {
             throws IOException {
         ObjectNode capture = read(id);
         if (name.isBlank()
-                || name.length() > 100
+                || name.length() > AnalyzerLimits.MAX_CAPTURE_NAME_LENGTH
                 || from < 0
                 || to < from
                 || capture.path("messages").isEmpty()
@@ -939,7 +997,7 @@ public final class CaptureStore {
         Iterator<Map.Entry<String, JsonNode>> fields = capture.fields();
         while (fields.hasNext()) {
             Map.Entry<String, JsonNode> field = fields.next();
-            if (!field.getKey().equals("messages") && !field.getKey().equals("dictionary")) {
+            if (!"messages".equals(field.getKey()) && !"dictionary".equals(field.getKey())) {
                 result.set(field.getKey(), field.getValue().deepCopy());
             }
         }

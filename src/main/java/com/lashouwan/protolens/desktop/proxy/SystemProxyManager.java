@@ -2,6 +2,7 @@ package com.lashouwan.protolens.desktop.proxy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.lashouwan.protolens.constant.NetworkConstants;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
@@ -16,6 +17,8 @@ import java.nio.file.attribute.AclEntry;
 import java.nio.file.attribute.AclEntryPermission;
 import java.nio.file.attribute.AclEntryType;
 import java.nio.file.attribute.AclFileAttributeView;
+import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.util.EnumSet;
 import java.util.HexFormat;
@@ -76,7 +79,7 @@ public final class SystemProxyManager implements AutoCloseable {
                         .put("managed", lease != null && applied != null)
                         .put("autoPrompt", autoPrompt)
                         .put("automatic", automatic)
-                        .put("target", "127.0.0.1:" + port)
+                        .put("target", NetworkConstants.LOOPBACK_HOST + ":" + port)
                         .put("message", message)
                         .put("requiresAuthorization", backend.requiresAuthorization())
                         .put("vpnNotice", "仅管理系统 HTTP/HTTPS 代理，无法可靠识别或控制 VPN 的 TUN 模式");
@@ -116,7 +119,7 @@ public final class SystemProxyManager implements AutoCloseable {
             throw new IllegalArgumentException("请等待采集器就绪后再接管，避免游戏断网");
         }
         ProxySettings current = backend.readFor(applied);
-        if (applied != null && lease != null && current.equals(applied)) {
+        if (lease != null && current.equals(applied)) {
             return status();
         }
         if (applied != null) {
@@ -275,12 +278,9 @@ public final class SystemProxyManager implements AutoCloseable {
                                         .setPermissions(EnumSet.allOf(AclEntryPermission.class))
                                         .build()));
             }
-            var posix =
-                    Files.getFileAttributeView(
-                            temporary, java.nio.file.attribute.PosixFileAttributeView.class);
+            var posix = Files.getFileAttributeView(temporary, PosixFileAttributeView.class);
             if (posix != null) {
-                posix.setPermissions(
-                        java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
+                posix.setPermissions(PosixFilePermissions.fromString("rw-------"));
             }
             try {
                 Files.move(temporary, stateFile(), StandardCopyOption.ATOMIC_MOVE);

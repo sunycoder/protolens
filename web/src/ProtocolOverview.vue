@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { MAX_PROTOCOL_OVERVIEW_GROUPS } from "./constants";
 import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { api, type Packet } from "./types";
 import { RequestGate } from "./workspaceRefresh";
@@ -86,7 +87,8 @@ onBeforeUnmount(() => gate.cancel());
       {{ error }} <el-button @click="refresh">重试</el-button>
     </p>
     <p v-if="data?.distributionTruncated" class="warning-bar">
-      共 {{ data.protocolGroupCount }} 组，仅展示次数最多的 200 组。
+      共 {{ data.protocolGroupCount }} 组，仅展示次数最多的
+      {{ MAX_PROTOCOL_OVERVIEW_GROUPS }} 组。
     </p>
     <el-table
       :data="groups"

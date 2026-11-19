@@ -1,33 +1,27 @@
 package com.lashouwan.protolens.desktop.proxy;
 
+import com.lashouwan.protolens.constant.NetworkConstants;
+import com.lashouwan.protolens.constant.ProxyConstants;
+import com.lashouwan.protolens.enums.MacProxyKind;
+
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 /** macOS 原生 networksetup 适配；只操作已确认网络服务，通过系统授权框执行固定命令。 */
 public final class MacSystemProxyBackend implements SystemProxyBackend {
-    static final List<String> KEYS =
-            List.of("http", "https", "pac", "discovery", "socks", "bypass");
-    private static final Map<String, String> GETTERS =
-            Map.of(
-                    "http",
-                    "-getwebproxy",
-                    "https",
-                    "-getsecurewebproxy",
-                    "pac",
-                    "-getautoproxyurl",
-                    "discovery",
-                    "-getproxyautodiscovery",
-                    "socks",
-                    "-getsocksfirewallproxy",
-                    "bypass",
-                    "-getproxybypassdomains");
+    /** 网络输出语法固定；预编译后在多次状态刷新时复用。 */
+    private static final Pattern PRIMARY_INTERFACE =
+            Pattern.compile("(?m)^Network interfaces: (\\S+)");
+
+    private static final Pattern NETWORK_SERVICE = Pattern.compile("^\\((\\d+|\\*)\\) (.+)$");
     private final CommandRunner runner;
     private final MacProxyAuthorizationSession authorization;
 
@@ -61,13 +55,14 @@ public final class MacSystemProxyBackend implements SystemProxyBackend {
         // scutil 的 PrimaryInterface 同时适用于 IPv4 和 IPv6；VPN/TUN 不匹配物理服务时停止猜测。
         String device = primaryDevice();
         String service =
-                serviceForDevice(run("/usr/sbin/networksetup", "-listnetworkserviceorder"), device);
+                serviceForDevice(
+                        run(ProxyConstants.NETWORK_SETUP, "-listnetworkserviceorder"), device);
         return readService(service, device).snapshot();
     }
 
     private String primaryDevice() throws Exception {
-        String output = run("/usr/sbin/scutil", "--nwi");
-        var match = Pattern.compile("(?m)^Network interfaces: (\\S+)").matcher(output);
+        String output = run(ProxyConstants.SCUTIL, "--nwi");
+        var match = PRIMARY_INTERFACE.matcher(output);
         if (!match.find()) {
             throw new IOException("未找到当前联网接口，请连网后刷新代理状态，或手动设置代理");
         }
@@ -78,9 +73,9 @@ public final class MacSystemProxyBackend implements SystemProxyBackend {
         String service = null;
         var found = new ArrayList<String>();
         for (String line : output.split("\n")) {
-            var name = Pattern.compile("^\\((\\d+|\\*)\\) (.+)$").matcher(line.strip());
+            var name = NETWORK_SERVICE.matcher(line.strip());
             if (name.matches()) {
-                service = name.group(1).equals("*") ? null : name.group(2);
+                service = "*".equals(name.group(1)) ? null : name.group(2);
             } else if (line.contains("Device: " + device + ")") && service != null) {
                 found.add(service);
                 service = null;
@@ -94,8 +89,10 @@ public final class MacSystemProxyBackend implements SystemProxyBackend {
 
     private MacProxySettings readService(String service, String device) throws Exception {
         var values = new LinkedHashMap<String, String>();
-        for (String key : KEYS) {
-            values.put(key, run("/usr/sbin/networksetup", GETTERS.get(key), service).strip());
+        for (MacProxyKind kind : MacProxyKind.values()) {
+            values.put(
+                    kind.code(),
+                    run(ProxyConstants.NETWORK_SETUP, kind.readCommand(), service).strip());
         }
         var result = new MacProxySettings(service, device, values);
         result.hasProxyConfiguration(); // 输出格式未知时拒绝执行写操作，不当成无代理。
@@ -155,7 +152,7 @@ public final class MacSystemProxyBackend implements SystemProxyBackend {
                         + appleString(shell)
                         + " with administrator privileges with prompt \"ProtoLens 需要修改或恢复当前网络的"
                         + " HTTP/HTTPS 代理\"";
-        runner.run(List.of("/usr/bin/osascript", "-e", script), true);
+        runner.run(List.of(ProxyConstants.OSASCRIPT, "-e", script), true);
     }
 
     /** 与工作台生命周期一致，保留到恢复完成后再释放，不在每次恢复时销毁授权会话。 */
@@ -171,99 +168,107 @@ public final class MacSystemProxyBackend implements SystemProxyBackend {
             throw new IllegalArgumentException("不能跨网络服务写入代理快照");
         }
         StringBuilder shell = new StringBuilder("export LC_ALL=C; export LANG=C;\n");
-        for (String key : KEYS) {
+        for (MacProxyKind kind : MacProxyKind.values()) {
             shell.append("[ \"$(")
-                    .append(getter(expected, key))
+                    .append(getter(expected, kind))
                     .append(")\" = ")
-                    .append(quote(expected.values().get(key)))
+                    .append(quote(expected.value(kind)))
                     .append(" ] || exit 3\n");
         }
-        List<String> changed =
-                KEYS.stream()
-                        .filter(key -> !expected.values().get(key).equals(target.values().get(key)))
-                        .toList();
+        List<MacProxyKind> changed = new ArrayList<>();
+        for (MacProxyKind kind : MacProxyKind.values()) {
+            if (!expected.value(kind).equals(target.value(kind))) {
+                changed.add(kind);
+            }
+        }
         shell.append("rollback() { trap - EXIT HUP INT TERM;\n");
         for (int i = changed.size() - 1; i >= 0; i--) {
-            String key = changed.get(i);
+            MacProxyKind kind = changed.get(i);
             shell.append("if [ \"${done_")
-                    .append(key)
+                    .append(kind.code())
                     .append(":-0}\" = 1 ] && [ \"$(")
-                    .append(getter(expected, key))
+                    .append(getter(expected, kind))
                     .append(")\" = \"$after_")
-                    .append(key)
+                    .append(kind.code())
                     .append("\" ]; then\n")
-                    .append(setter(expected, key))
+                    .append(setter(expected, kind))
                     .append("; fi\n");
         }
         shell.append("}; trap 'rollback' EXIT; trap 'exit 4' HUP INT TERM\n");
-        for (String key : changed) {
+        for (MacProxyKind kind : changed) {
             // 每个已完成的类别记录实际输出，失败后仅撤销仍保持这个值的类别。
             shell.append("step_ok=0; ")
-                    .append(setter(target, key))
+                    .append(setter(target, kind))
                     .append(" && step_ok=1\n")
                     .append("after_")
-                    .append(key)
+                    .append(kind.code())
                     .append("=$(")
-                    .append(getter(expected, key))
+                    .append(getter(expected, kind))
                     .append(") || exit 4\n")
                     .append("done_")
-                    .append(key)
+                    .append(kind.code())
                     .append("=1\n")
                     .append("[ \"$step_ok\" = 1 ] || exit 4\n");
         }
-        for (String key : KEYS) {
+        for (MacProxyKind kind : MacProxyKind.values()) {
             shell.append("[ \"$(")
-                    .append(getter(target, key))
+                    .append(getter(target, kind))
                     .append(")\" = ")
-                    .append(quote(target.values().get(key)))
+                    .append(quote(target.value(kind)))
                     .append(" ] || exit 4\n");
         }
         return shell.append("trap - EXIT HUP INT TERM\n").toString();
     }
 
-    private static String getter(MacProxySettings settings, String key) {
-        return "/usr/sbin/networksetup " + GETTERS.get(key) + " " + quote(settings.service());
+    private static String getter(MacProxySettings settings, MacProxyKind kind) {
+        return ProxyConstants.NETWORK_SETUP
+                + " "
+                + kind.readCommand()
+                + " "
+                + quote(settings.service());
     }
 
-    private static String setter(MacProxySettings settings, String key) {
-        String prefix = "/usr/sbin/networksetup ";
+    /** 命令类别穷举；HTTP/HTTPS 同时恢复地址和开关，PAC 及自动发现只改开关。 */
+    private static String setter(MacProxySettings settings, MacProxyKind kind) {
+        String prefix = ProxyConstants.NETWORK_SETUP + " ";
         String service = quote(settings.service());
-        String enabled = settings.enabled(key) ? "on" : "off";
-        if (key.equals("http") || key.equals("https")) {
-            String value = settings.values().get(key);
-            if (!MacProxySettings.field(value, "Authenticated Proxy Enabled").equals("0")) {
-                throw new IllegalArgumentException("无法安全恢复含密码的认证代理");
+        return switch (kind) {
+            case HTTP, HTTPS -> {
+                String value = settings.value(kind);
+                if (!ProxyConstants.AUTHENTICATION_DISABLED.equals(
+                        MacProxySettings.field(value, ProxyConstants.FIELD_AUTHENTICATED))) {
+                    throw new IllegalArgumentException("无法安全恢复含密码的认证代理");
+                }
+                int port =
+                        Integer.parseInt(MacProxySettings.field(value, ProxyConstants.FIELD_PORT));
+                if (port < 0 || port > NetworkConstants.MAX_PORT) {
+                    throw new IllegalArgumentException("macOS 代理端口无效");
+                }
+                yield prefix
+                        + kind.addressCommand()
+                        + " "
+                        + service
+                        + " "
+                        + quote(MacProxySettings.field(value, ProxyConstants.FIELD_SERVER))
+                        + " "
+                        + port
+                        + " off && "
+                        + prefix
+                        + kind.stateCommand()
+                        + " "
+                        + service
+                        + " "
+                        + (settings.enabled(kind) ? "on" : "off");
             }
-            int port = Integer.parseInt(MacProxySettings.field(value, "Port"));
-            if (port < 0 || port > 65535) {
-                throw new IllegalArgumentException("macOS 代理端口无效");
-            }
-            String command = key.equals("http") ? "webproxy" : "securewebproxy";
-            return prefix
-                    + "-set"
-                    + command
-                    + " "
-                    + service
-                    + " "
-                    + quote(MacProxySettings.field(value, "Server"))
-                    + " "
-                    + port
-                    + " off && "
-                    + prefix
-                    + "-set"
-                    + command
-                    + "state "
-                    + service
-                    + " "
-                    + enabled;
-        }
-        if (key.equals("pac")) {
-            return prefix + "-setautoproxystate " + service + " " + enabled;
-        }
-        if (key.equals("discovery")) {
-            return prefix + "-setproxyautodiscovery " + service + " " + enabled;
-        }
-        throw new IllegalArgumentException("不允许改写 SOCKS 或代理绕过项");
+            case PAC, DISCOVERY ->
+                    prefix
+                            + kind.stateCommand()
+                            + " "
+                            + service
+                            + " "
+                            + (settings.enabled(kind) ? "on" : "off");
+            case SOCKS, BYPASS -> throw new IllegalArgumentException("不允许改写 SOCKS 或代理绕过项");
+        };
     }
 
     static String quote(String text) {
@@ -290,23 +295,33 @@ public final class MacSystemProxyBackend implements SystemProxyBackend {
         Process process = builder.start();
         // 持续读取避免长网络服务名或多服务输出填满管道；不把原配置/PAC URL写到日志。
         var output =
-                java.util.concurrent.CompletableFuture.supplyAsync(
+                CompletableFuture.supplyAsync(
                         () -> {
                             try {
-                                return process.getInputStream().readNBytes(131072);
+                                return process.getInputStream()
+                                        .readNBytes(ProxyConstants.MAX_COMMAND_OUTPUT_BYTES);
                             } catch (IOException failure) {
-                                throw new java.io.UncheckedIOException(failure);
+                                throw new UncheckedIOException(failure);
                             }
                         });
         try {
             process.getOutputStream().close();
-            if (!process.waitFor(authorized ? 120 : 10, TimeUnit.SECONDS)) {
+            if (!process.waitFor(
+                    authorized
+                            ? ProxyConstants.AUTHORIZATION_TIMEOUT_SECONDS
+                            : ProxyConstants.READ_TIMEOUT_SECONDS,
+                    TimeUnit.SECONDS)) {
                 throw new IOException("macOS 代理操作超时，请检查系统授权框并刷新代理状态");
             }
             String text =
-                    new String(output.get(5, TimeUnit.SECONDS), StandardCharsets.UTF_8).strip();
+                    new String(
+                                    output.get(
+                                            ProxyConstants.OUTPUT_TIMEOUT_SECONDS,
+                                            TimeUnit.SECONDS),
+                                    StandardCharsets.UTF_8)
+                            .strip();
             if (process.exitValue() != 0) {
-                if (text.contains("-128")) {
+                if (text.contains(ProxyConstants.APPLE_USER_CANCELLED_CODE)) {
                     throw new IOException("已取消 macOS 系统授权，代理操作未完成");
                 }
                 throw new IOException("macOS 代理操作未完成，请检查网络或授权状态后重试；原配置备份用于恢复");

@@ -3,6 +3,9 @@ package com.lashouwan.protolens.config;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.lashouwan.protolens.constant.AnalyzerLimits;
+import com.lashouwan.protolens.constant.NetworkConstants;
+import com.lashouwan.protolens.enums.FrontendMode;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -36,11 +39,11 @@ public final class AnalyzerConfig {
     /** 源码开发页面端口；静态页面与后端共用端口。 */
     private final int frontendPort;
 
-    /** 采集代理监听端口，与 Windows 手动代理设置保持一致。 */
+    /** 采集代理监听端口，与实际系统代理设置保持一致。 */
     private final int collectorPort;
 
     /** auto 根据源码/发行包选择 dev/static，显式配置可固定模式。 */
-    private final String frontendMode;
+    private final FrontendMode frontendMode;
 
     /** 就绪后打开默认浏览器，默认 true。 */
     private final boolean openBrowser;
@@ -73,13 +76,10 @@ public final class AnalyzerConfig {
     private final int maxCacheMiB;
 
     private AnalyzerConfig(JsonNode input) {
-        serverPort = integer(input, "serverPort", 18766, 0, 65535);
-        frontendPort = integer(input, "frontendPort", 5174, 1, 65535);
-        collectorPort = integer(input, "collectorPort", 18888, 1, 65535);
-        frontendMode = text(input, "frontendMode", "auto");
-        if (!Set.of("auto", "dev", "static").contains(frontendMode)) {
-            throw new IllegalArgumentException("frontendMode 必须为 auto、dev 或 static");
-        }
+        serverPort = integer(input, "serverPort", 18766, 0, NetworkConstants.MAX_PORT);
+        frontendPort = integer(input, "frontendPort", 5174, 1, NetworkConstants.MAX_PORT);
+        collectorPort = integer(input, "collectorPort", 18888, 1, NetworkConstants.MAX_PORT);
+        frontendMode = FrontendMode.fromCode(text(input, "frontendMode", FrontendMode.AUTO.code()));
         if (serverPort == collectorPort || frontendPort == collectorPort) {
             throw new IllegalArgumentException("采集器端口必须与后端、开发页面端口不同");
         }
@@ -94,8 +94,20 @@ public final class AnalyzerConfig {
         autoStartCollector = bool(input, "autoStartCollector", true);
         autoSystemProxy = bool(input, "autoSystemProxy", true);
         captureTargets = CaptureTargets.from(input);
-        maxMessages = integer(input, "maxMessages", 10000, 100, 50000);
-        maxCacheMiB = integer(input, "maxCacheMiB", 64, 1, 256);
+        maxMessages =
+                integer(
+                        input,
+                        "maxMessages",
+                        AnalyzerLimits.DEFAULT_CACHE_MESSAGES,
+                        AnalyzerLimits.MIN_CACHE_MESSAGES,
+                        AnalyzerLimits.MAX_CACHE_MESSAGES);
+        maxCacheMiB =
+                integer(
+                        input,
+                        "maxCacheMiB",
+                        AnalyzerLimits.DEFAULT_CACHE_MIB,
+                        AnalyzerLimits.MIN_CACHE_MIB,
+                        AnalyzerLimits.MAX_CACHE_MIB);
     }
 
     /** 缺少默认文件时使用类中默认值；显式指定文件的存在性由启动解析器检查。 */
@@ -130,7 +142,7 @@ public final class AnalyzerConfig {
                         .put("serverPort", serverPort)
                         .put("frontendPort", frontendPort)
                         .put("collectorPort", collectorPort)
-                        .put("frontendMode", frontendMode)
+                        .put("frontendMode", frontendMode.code())
                         .put("openBrowser", openBrowser)
                         .put("dataDirectory", dataDirectory)
                         .put("competitorPath", competitorPath)
@@ -192,7 +204,7 @@ public final class AnalyzerConfig {
     }
 
     public String frontendMode() {
-        return frontendMode;
+        return frontendMode.code();
     }
 
     public boolean openBrowser() {

@@ -1,6 +1,7 @@
 package com.lashouwan.protolens.desktop;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.lashouwan.protolens.enums.OperatingSystem;
 
 import java.util.List;
 import java.util.Locale;
@@ -17,27 +18,26 @@ public final class ReleaseAssets {
      */
     public static JsonNode select(JsonNode assets, RuntimePlatform platform) {
         List<String> extensions =
-                switch (platform.os()) {
-                    case "windows" -> List.of(".exe", ".zip");
-                    case "macos" -> List.of(".dmg", ".pkg", ".tar.gz");
-                    case "linux" -> List.of(".deb", ".rpm", ".tar.gz");
-                    default -> throw new IllegalArgumentException("不支持的更新平台：" + platform.os());
+                switch (platform.operatingSystem()) {
+                    case WINDOWS -> List.of(".exe", ".zip");
+                    case MACOS -> List.of(".dmg", ".pkg", ".tar.gz");
+                    case LINUX -> List.of(".deb", ".rpm", ".tar.gz");
                 };
         // 先遍历格式优先级，再检查同架构文件，确保先列出的便携包不会抢占 DMG。
         for (String extension : extensions) {
             for (JsonNode asset : assets) {
                 String name = asset.path("name").asText("").toLowerCase(Locale.ROOT);
                 if (!name.startsWith("protolens-")
-                        || !asset.path("state").asText("uploaded").equals("uploaded")
+                        || !"uploaded".equals(asset.path("state").asText("uploaded"))
                         || (asset.has("size") && asset.path("size").asLong() <= 0)
                         || asset.path("browser_download_url").asText("").isBlank()) {
                     continue;
                 }
                 boolean exactPlatform = name.endsWith("-" + platform.id() + extension);
                 boolean windowsLatest =
-                        platform.os().equals("windows")
-                                && extension.equals(".exe")
-                                && name.equals("protolens-latest.exe");
+                        platform.operatingSystem() == OperatingSystem.WINDOWS
+                                && ".exe".equals(extension)
+                                && "protolens-latest.exe".equals(name);
                 if (exactPlatform || windowsLatest) {
                     return asset;
                 }

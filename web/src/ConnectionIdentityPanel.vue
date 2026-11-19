@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { MAX_CONNECTION_NOTE_LENGTH, MAX_IDENTITY_HISTORY } from "./constants";
+import { IdentityState } from "./domain";
 import { ref, watch } from "vue";
 import { api, post, type Capture } from "./types";
 import { connectionLabel } from "./connectionIdentity";
@@ -123,7 +125,7 @@ onBeforeUnmount(() => gate.cancel());
       <strong>{{ connectionLabel(connection) }}</strong>
       <p class="muted identity-endpoint">连接 ID：{{ connection.id }}</p>
       <p class="muted identity-endpoint">{{ connection.endpoint }}</p>
-      <p v-if="connection.identity?.state === 'identified'">
+      <p v-if="connection.identity?.state === IdentityState.IDENTIFIED">
         账号 ID：{{ connection.identity.accountId || "未提供" }} · 角色 ID：{{
           connection.identity.roleId
         }}
@@ -131,7 +133,7 @@ onBeforeUnmount(() => gate.cancel());
       </p>
       <p v-else class="muted">
         {{
-          connection.identity?.state === "pending"
+          connection.identity?.state === IdentityState.PENDING
             ? "已捕获登录请求，尚未确认玩家身份。"
             : "当前连接尚无可确认的玩家身份。"
         }}
@@ -139,12 +141,14 @@ onBeforeUnmount(() => gate.cancel());
       </p>
       <p v-if="connection.identity" class="muted">
         {{
-          connection.identity.state === "identified" ? "识别依据" : "已捕获"
+          connection.identity.state === IdentityState.IDENTIFIED
+            ? "识别依据"
+            : "已捕获"
         }}：{{ connection.identity.sourceProtocol }} · 消息 #{{
           connection.identity.sourceIndex
         }}
         {{
-          connection.identity.state === "identified"
+          connection.identity.state === IdentityState.IDENTIFIED
             ? " 起；此前消息不自动归入该身份。"
             : "；这只是登录请求，不代表已确认账号。"
         }}
@@ -152,7 +156,7 @@ onBeforeUnmount(() => gate.cancel());
       <div class="identity-note">
         <el-input
           v-model="notes[connection.id]"
-          maxlength="40"
+          :maxlength="MAX_CONNECTION_NOTE_LENGTH"
           show-word-limit
           placeholder="例如 主号、测试小号（最多40字）"
           :aria-label="`连接 ${connection.id} 的备注`"
@@ -165,7 +169,8 @@ onBeforeUnmount(() => gate.cancel());
           身份变更记录（{{ connection.identityHistory.length }}）
         </summary>
         <p v-if="connection.identityHistoryTruncated" class="warning-bar">
-          仅保留最近 256 次变更，较早身份无法从此历史恢复。
+          仅保留最近
+          {{ MAX_IDENTITY_HISTORY }} 次变更，较早身份无法从此历史恢复。
         </p>
         <p
           v-for="event in connection.identityHistory"
@@ -174,7 +179,7 @@ onBeforeUnmount(() => gate.cancel());
         >
           #{{ event.sourceIndex }} ·
           {{
-            event.state === "pending"
+            event.state === IdentityState.PENDING
               ? "登录请求，身份待确认"
               : `${event.nickname || "未提供昵称"} · ${event.serverId || "?"}服 · 角色 ${event.roleId}`
           }}

@@ -1,6 +1,8 @@
 package com.lashouwan.protolens.desktop.proxy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lashouwan.protolens.constant.ProxyConstants;
+import com.lashouwan.protolens.enums.WindowsProxyAction;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -25,12 +27,12 @@ public final class WindowsSystemProxyBackend implements SystemProxyBackend {
 
     @Override
     public ProxySettings read() throws Exception {
-        return execute("Read", null);
+        return execute(WindowsProxyAction.READ, null);
     }
 
     @Override
     public void write(ProxySettings settings) throws Exception {
-        execute("Write", settings);
+        execute(WindowsProxyAction.WRITE, settings);
     }
 
     @Override
@@ -38,10 +40,10 @@ public final class WindowsSystemProxyBackend implements SystemProxyBackend {
         var input = mapper.createObjectNode();
         input.set("expected", mapper.valueToTree(expected));
         input.set("settings", mapper.valueToTree(settings));
-        execute("CompareWrite", input);
+        execute(WindowsProxyAction.COMPARE_WRITE, input);
     }
 
-    private ProxySettings execute(String action, Object value) throws Exception {
+    private ProxySettings execute(WindowsProxyAction action, Object value) throws Exception {
         if (!supported() || !Files.isRegularFile(script)) {
             throw new IOException("此环境无法使用随包 Windows 系统代理适配器");
         }
@@ -58,7 +60,7 @@ public final class WindowsSystemProxyBackend implements SystemProxyBackend {
                                 "-File",
                                 script.toString(),
                                 "-Action",
-                                action)
+                                action.code())
                         .redirectErrorStream(true)
                         .start();
         try {
@@ -67,10 +69,11 @@ public final class WindowsSystemProxyBackend implements SystemProxyBackend {
                     input.write(mapper.writeValueAsBytes(value));
                 }
             }
-            if (!process.waitFor(15, TimeUnit.SECONDS)) {
+            if (!process.waitFor(ProxyConstants.WINDOWS_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                 throw new IOException("系统代理操作超时，未确认执行结果");
             }
-            byte[] output = process.getInputStream().readNBytes(65536);
+            byte[] output =
+                    process.getInputStream().readNBytes(ProxyConstants.MAX_WINDOWS_OUTPUT_BYTES);
             if (process.exitValue() == 3) {
                 throw new IOException("系统代理在操作前已变化，未覆盖；请重新确认");
             }

@@ -1,7 +1,13 @@
 package com.lashouwan.protolens.desktop.proxy;
 
+import com.lashouwan.protolens.constant.NetworkConstants;
+import com.lashouwan.protolens.constant.ProxyConstants;
+import com.lashouwan.protolens.enums.MacProxyKind;
+
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** 单个 macOS 网络服务的原始输出快照；PAC URL 和绕过项仅用于一致性检查，不在接管时改写。 */
 public record MacProxySettings(String service, String device, Map<String, String> values) {
@@ -14,8 +20,8 @@ public record MacProxySettings(String service, String device, Map<String, String
             throw new IllegalArgumentException("macOS 代理快照缺少网络服务");
         }
         values = Map.copyOf(values);
-        for (String key : MacSystemProxyBackend.KEYS) {
-            if (!values.containsKey(key)) {
+        for (MacProxyKind kind : MacProxyKind.values()) {
+            if (!values.containsKey(kind.code())) {
                 throw new IllegalArgumentException("macOS 代理快照字段不完整");
             }
         }
@@ -30,53 +36,67 @@ public record MacProxySettings(String service, String device, Map<String, String
         throw new IllegalArgumentException("无法识别 macOS 代理字段：" + key);
     }
 
-    boolean enabled(String key) {
-        String name = key.equals("discovery") ? "Auto Proxy Discovery" : "Enabled";
-        String value = field(values.get(key), name);
-        if (!value.equals("Yes")
-                && !value.equals("No")
-                && !value.equals("On")
-                && !value.equals("Off")) {
-            throw new IllegalArgumentException("无法识别 macOS 代理开关");
-        }
-        return value.equals("Yes") || value.equals("On");
+    /** 快照继续用原有字符串键落盘，业务代码只能通过枚举读取，防止类别拼写错误。 */
+    String value(MacProxyKind kind) {
+        return values.get(kind.code());
+    }
+
+    boolean enabled(MacProxyKind kind) {
+        return switch (field(value(kind), kind.enabledField())) {
+            case "Yes", "On" -> true;
+            case "No", "Off" -> false;
+            default -> throw new IllegalArgumentException("无法识别 macOS 代理开关");
+        };
     }
 
     boolean hasProxyConfiguration() {
-        return enabled("http")
-                || enabled("https")
-                || enabled("pac")
-                || enabled("discovery")
-                || enabled("socks");
+        for (MacProxyKind kind : MacProxyKind.SWITCHABLE) {
+            if (enabled(kind)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     boolean pointsTo(int port) {
-        for (String key : new String[] {"http", "https"}) {
-            String value = values.get(key);
-            if (!enabled(key)
-                    || !field(value, "Server").equals("127.0.0.1")
-                    || !field(value, "Port").equals(Integer.toString(port))) {
+        for (MacProxyKind kind : MacProxyKind.WEB_PROXIES) {
+            String value = value(kind);
+            if (!enabled(kind)
+                    || !NetworkConstants.LOOPBACK_HOST.equals(
+                            field(value, ProxyConstants.FIELD_SERVER))
+                    || !field(value, ProxyConstants.FIELD_PORT).equals(Integer.toString(port))) {
                 return false;
             }
         }
-        return !enabled("pac") && !enabled("discovery") && !enabled("socks");
+        return !enabled(MacProxyKind.PAC)
+                && !enabled(MacProxyKind.DISCOVERY)
+                && !enabled(MacProxyKind.SOCKS);
     }
 
     /** 接管只改 HTTP/HTTPS 和自动代理开关，保留其他字段的原始顺序及内容，供完整快照比较。 */
     MacProxySettings local(int port) {
         var result = new LinkedHashMap<>(values);
-        for (String key : new String[] {"http", "https"}) {
-            String value = values.get(key);
-            if (!field(value, "Authenticated Proxy Enabled").equals("0")) {
+        for (MacProxyKind kind : MacProxyKind.WEB_PROXIES) {
+            String value = value(kind);
+            if (!ProxyConstants.AUTHENTICATION_DISABLED.equals(
+                    field(value, ProxyConstants.FIELD_AUTHENTICATED))) {
                 throw new IllegalArgumentException("当前网络含认证代理，无法备份原密码，请保留原设置并手动配置采集代理");
             }
-            value = replace(value, "Enabled", "Yes");
-            value = replace(value, "Server", "127.0.0.1");
-            result.put(key, replace(value, "Port", Integer.toString(port)));
+            value = replace(value, kind.enabledField(), "Yes");
+            value = replace(value, ProxyConstants.FIELD_SERVER, NetworkConstants.LOOPBACK_HOST);
+            result.put(
+                    kind.code(), replace(value, ProxyConstants.FIELD_PORT, Integer.toString(port)));
         }
-        result.put("pac", replace(values.get("pac"), "Enabled", "No"));
-        result.put("discovery", replace(values.get("discovery"), "Auto Proxy Discovery", "Off"));
-        if (enabled("socks")) {
+        result.put(
+                MacProxyKind.PAC.code(),
+                replace(value(MacProxyKind.PAC), MacProxyKind.PAC.enabledField(), "No"));
+        result.put(
+                MacProxyKind.DISCOVERY.code(),
+                replace(
+                        value(MacProxyKind.DISCOVERY),
+                        MacProxyKind.DISCOVERY.enabledField(),
+                        "Off"));
+        if (enabled(MacProxyKind.SOCKS)) {
             throw new IllegalArgumentException("当前网络启用了 SOCKS 代理，请先在原代理软件中关闭后再接管，避免流量绕过采集器");
         }
         return new MacProxySettings(service, device, result);
@@ -84,8 +104,8 @@ public record MacProxySettings(String service, String device, Map<String, String
 
     MacProxySettings disableLocal() {
         var result = new LinkedHashMap<>(values);
-        for (String key : new String[] {"http", "https"}) {
-            result.put(key, replace(values.get(key), "Enabled", "No"));
+        for (MacProxyKind kind : MacProxyKind.WEB_PROXIES) {
+            result.put(kind.code(), replace(value(kind), kind.enabledField(), "No"));
         }
         return new MacProxySettings(service, device, result);
     }
@@ -93,8 +113,8 @@ public record MacProxySettings(String service, String device, Map<String, String
     private static String replace(String value, String key, String replacement) {
         field(value, key);
         return value.replaceAll(
-                "(?m)^" + java.util.regex.Pattern.quote(key) + ":.*$",
-                java.util.regex.Matcher.quoteReplacement(key + ": " + replacement));
+                "(?m)^" + Pattern.quote(key) + ":.*$",
+                Matcher.quoteReplacement(key + ": " + replacement));
     }
 
     ProxySettings snapshot() {

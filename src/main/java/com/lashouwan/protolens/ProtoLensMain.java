@@ -1,6 +1,7 @@
 package com.lashouwan.protolens;
 
 import com.lashouwan.protolens.config.AnalyzerLaunchOptions;
+import com.lashouwan.protolens.constant.NetworkConstants;
 import com.lashouwan.protolens.desktop.DesktopLauncher;
 import com.lashouwan.protolens.desktop.DevelopmentFrontend;
 import com.lashouwan.protolens.desktop.InstanceCoordinator;
@@ -147,7 +148,9 @@ public final class ProtoLensMain {
                 frontend.start(options);
             }
             String browserAddress =
-                    options.development() ? options.devOrigin() : "http://127.0.0.1:" + port;
+                    options.development()
+                            ? options.devOrigin()
+                            : NetworkConstants.HTTP_LOOPBACK_PREFIX + port;
             logger.info(
                     "ProtoLens 协议分析工作台就绪 browserAddress:{} backendPort:{} dataDirectory:{} mode:{}",
                     browserAddress,
@@ -158,9 +161,9 @@ public final class ProtoLensMain {
                     "运行地址 configFile:{} backendAddress:{} browserAddress:{} collectorProxy:{}"
                             + " protocolDefault:{}",
                     options.configFile(),
-                    "http://127.0.0.1:" + port,
+                    NetworkConstants.HTTP_LOOPBACK_PREFIX + port,
                     browserAddress,
-                    "127.0.0.1:" + options.config().collectorPort(),
+                    NetworkConstants.LOOPBACK_HOST + ":" + options.config().collectorPort(),
                     options.config().competitorPath());
             page.set(browserAddress);
             instance.publish(port);

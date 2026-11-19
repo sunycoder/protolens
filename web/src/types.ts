@@ -1,3 +1,4 @@
+import type { IdentityState } from "./domain";
 export interface Connection {
   note?: string;
   identity?: ConnectionIdentity;
@@ -9,7 +10,7 @@ export interface Connection {
   messages: number;
 }
 export interface ConnectionIdentity {
-  state: "identified" | "pending";
+  state: IdentityState;
   accountId?: string;
   roleId?: string;
   nickname?: string;

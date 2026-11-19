@@ -1,6 +1,7 @@
 package com.lashouwan.protolens.desktop;
 
 import com.lashouwan.protolens.config.AnalyzerLaunchOptions;
+import com.lashouwan.protolens.enums.OperatingSystem;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -19,7 +20,7 @@ public final class RuntimeTools {
     }
 
     public static Path collector(AnalyzerLaunchOptions options) {
-        if (RuntimePlatform.current().os().equals("macos")) {
+        if (RuntimePlatform.current().operatingSystem() == OperatingSystem.MACOS) {
             Path relative = Path.of("mitmproxy.app/Contents/MacOS/mitmdump");
             Path bundled = options.moduleRoot().resolve("runtime-tools").resolve(relative);
             return Files.isRegularFile(bundled)

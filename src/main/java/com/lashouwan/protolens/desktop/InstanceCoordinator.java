@@ -1,5 +1,7 @@
 package com.lashouwan.protolens.desktop;
 
+import com.lashouwan.protolens.constant.NetworkConstants;
+
 import io.vertx.core.json.JsonObject;
 
 import java.net.URI;
@@ -109,13 +111,15 @@ public final class InstanceCoordinator implements AutoCloseable {
                                 new JsonObject(Files.readString(metadata, StandardCharsets.UTF_8));
                         int port = value.getInteger("port", 0);
                         String instanceControl = value.getString("control", "");
-                        if (port < 1 || port > 65535 || instanceControl.isEmpty()) {
+                        if (port < 1
+                                || port > NetworkConstants.MAX_PORT
+                                || instanceControl.isEmpty()) {
                             openFailureReason = "已有实例的本机入口信息不完整";
                         } else {
                             HttpRequest request =
                                     HttpRequest.newBuilder(
                                                     URI.create(
-                                                            "http://127.0.0.1:"
+                                                            NetworkConstants.HTTP_LOOPBACK_PREFIX
                                                                     + port
                                                                     + "/api/desktop/open"))
                                             .timeout(Duration.ofSeconds(2))

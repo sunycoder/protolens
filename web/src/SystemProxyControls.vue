@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { PROXY_NETWORK_CHECK_INTERVAL_MS } from "./constants";
 import { onMounted, onUnmounted, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, post } from "./types";
@@ -92,7 +93,7 @@ onMounted(async () => {
             error.value = String(failure);
           });
         }
-      }, 30000);
+      }, PROXY_NETWORK_CHECK_INTERVAL_MS);
     }
     if (state.value.autoPrompt && !prompted) {
       prompted = true;

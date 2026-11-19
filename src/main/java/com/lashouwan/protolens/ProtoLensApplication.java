@@ -6,17 +6,21 @@ import com.lashouwan.protolens.capture.CaptureStore;
 import com.lashouwan.protolens.config.AnalyzerLaunchOptions;
 import com.lashouwan.protolens.config.AnalyzerSettingsStore;
 import com.lashouwan.protolens.constant.AnalyzerLimits;
+import com.lashouwan.protolens.constant.NetworkConstants;
 import com.lashouwan.protolens.desktop.CollectorProcess;
 import com.lashouwan.protolens.desktop.RuntimePlatform;
 import com.lashouwan.protolens.desktop.proxy.MacSystemProxyBackend;
 import com.lashouwan.protolens.desktop.proxy.SystemProxyManager;
 import com.lashouwan.protolens.desktop.proxy.WindowsSystemProxyBackend;
+import com.lashouwan.protolens.enums.CollectorState;
+import com.lashouwan.protolens.enums.OperatingSystem;
 import com.lashouwan.protolens.http.AnalyzerHttpSupport;
 import com.lashouwan.protolens.http.CaptureController;
 import com.lashouwan.protolens.http.DesktopController;
 import com.lashouwan.protolens.http.LiveCaptureController;
 import com.lashouwan.protolens.http.LocalAccessGuard;
 import com.lashouwan.protolens.http.ProtocolController;
+import com.lashouwan.protolens.http.ProtocolQueryController;
 import com.lashouwan.protolens.http.SystemController;
 import com.lashouwan.protolens.http.SystemProxyController;
 import com.lashouwan.protolens.mcp.AnalyzerMcpController;
@@ -24,6 +28,7 @@ import com.lashouwan.protolens.mcp.AnalyzerMcpTools;
 import com.lashouwan.protolens.mcp.ClientSourceReader;
 import com.lashouwan.protolens.protocol.ProtocolCatalog;
 import com.lashouwan.protolens.protocol.ProtocolCatalogService;
+import com.lashouwan.protolens.protocol.ProtocolQueryService;
 
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
@@ -69,14 +74,17 @@ public final class ProtoLensApplication {
         }
         this.systemProxy =
                 new SystemProxyManager(
-                        RuntimePlatform.current().os().equals("macos")
+                        RuntimePlatform.current().operatingSystem() == OperatingSystem.MACOS
                                 ? new MacSystemProxyBackend()
                                 : new WindowsSystemProxyBackend(
                                         options.moduleRoot()
                                                 .resolve("tools/WindowsSystemProxy.ps1")),
                         proxyDirectory,
                         options.config().collectorPort(),
-                        () -> "RUNNING".equals(collector.status(mapper).path("state").asText()));
+                        () ->
+                                CollectorState.RUNNING
+                                        .name()
+                                        .equals(collector.status(mapper).path("state").asText()));
     }
 
     /** 后端与采集器就绪后才尝试自动接管；冲突留给页面确认，禁止把网络切到未监听端口。 */
@@ -129,6 +137,14 @@ public final class ProtoLensApplication {
         system.register(router);
         new SystemProxyController(http, systemProxy).register(router);
         new ProtocolController(http, catalog, protocols, live.service(), mapper).register(router);
+        new ProtocolQueryController(
+                        http,
+                        new ProtocolQueryService(
+                                catalog,
+                                captures,
+                                new ClientSourceReader(settings, mapper),
+                                mapper))
+                .register(router);
         new CaptureController(http, captures, live.service()).register(router);
         AnalyzerMcpController mcp =
                 new AnalyzerMcpController(
@@ -159,7 +175,7 @@ public final class ProtoLensApplication {
         }
         router.route().failureHandler(context -> http.fail(context, context.failure()));
         server = vertx.createHttpServer().requestHandler(router);
-        return server.listen(options.port(), "127.0.0.1")
+        return server.listen(options.port(), NetworkConstants.LOOPBACK_HOST)
                 .map(
                         bound -> {
                             boundPort = bound.actualPort();
