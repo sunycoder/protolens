@@ -247,6 +247,7 @@ try {
   const expectedMachArch = architecture === "arm64" ? "arm64" : "x86_64";
   for (const binary of [
     launcher,
+    join(root, "runtime-tools/ProtoLensProxySession"),
     join(javaHome, "lib/server/libjvm.dylib"),
     join(root, "runtime-tools/node"),
     collectorExecutable,

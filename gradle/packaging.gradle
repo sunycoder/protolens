@@ -67,6 +67,8 @@ tasks.register('prepareCollector', JavaExec) {
 
 tasks.register('stageNativeTools') {
     dependsOn 'prepareMacProxySession'
+    inputs.files(provider { analyzerPlatform.os == 'macos'
+            ? [layout.buildDirectory.file('macos-native/ProtoLensProxySession').get().asFile] : [] })
     dependsOn 'prepareCollector'
     inputs.files(nativeNode, nativeCollector)
     inputs.files(provider { analyzerPlatform.os == 'macos'
