@@ -26,6 +26,37 @@ public final class CaptureController {
     }
 
     public void register(Router router) {
+        router.post("/api/captures/:id/continuous")
+                .handler(
+                        context ->
+                                http.worker(
+                                        context,
+                                        () -> captures.enableContinuous(context.pathParam("id"))));
+        router.get("/api/captures/:id/protocols")
+                .handler(
+                        context ->
+                                http.worker(
+                                        context,
+                                        () -> captures.analysisOverview(context.pathParam("id"))));
+        router.get("/api/captures/:id/previous/:index")
+                .handler(
+                        context ->
+                                http.worker(
+                                        context,
+                                        () ->
+                                                captures.previousSameProtocol(
+                                                        context.pathParam("id"),
+                                                        Integer.parseInt(
+                                                                context.pathParam("index")))));
+        router.post("/api/captures/:id/snapshot-current")
+                .handler(
+                        context ->
+                                http.worker(
+                                        context,
+                                        () ->
+                                                captures.snapshotCurrent(
+                                                        context.pathParam("id"),
+                                                        http.body(context).path("name").asText())));
         router.get("/api/captures/:id/overview")
                 .handler(
                         context ->
@@ -42,7 +73,8 @@ public final class CaptureController {
                                                     context.pathParam("id"),
                                                     input.path("name").asText(),
                                                     input.path("from").asInt(-1),
-                                                    input.path("to").asInt(-1));
+                                                    input.path("to").asInt(-1),
+                                                    input.path("context").asText());
                                         }));
         router.get("/api/captures").handler(context -> http.worker(context, captures::list));
         router.post("/api/import/saz")

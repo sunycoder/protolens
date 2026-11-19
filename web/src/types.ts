@@ -11,6 +11,13 @@ export interface Mark {
   to: number;
 }
 export interface Capture {
+  catalog?: { sha256: string; sourceFile?: string };
+  operationContext?: string;
+  continuous?: boolean;
+  continuousError?: string;
+  recoveryWarning?: string;
+  diskFirstIndex?: number;
+  diskLastIndex?: number;
   id: string;
   name: string;
   createdAt: string;
@@ -58,6 +65,9 @@ export interface Packet {
   catalog?: { sourceFile: string; sha256: string };
 }
 export interface Page {
+  queryMs?: number;
+  lockWaitMs?: number;
+  snapshotMs?: number;
   items: Packet[];
   total: number;
   capture: Capture;

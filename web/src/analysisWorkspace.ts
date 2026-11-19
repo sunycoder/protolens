@@ -56,8 +56,9 @@ export function findFieldMatches(value: unknown, query: string) {
 }
 
 /** 对比只表达实际字段变化，不据此推断请求、响应或广播关系。 */
-export function compareFields(before: unknown, after: unknown) {
+export function compareFields(before: unknown, after: unknown, arrayKey = "") {
   const changes: FieldChange[] = [];
+  const warnings: string[] = [];
   let visited = 0;
   let truncated = false;
   function visit(a: unknown, b: unknown, path: string, depth: number) {
@@ -68,6 +69,68 @@ export function compareFields(before: unknown, after: unknown) {
     if (Object.is(a, b)) return;
     const aObject = a !== null && typeof a === "object";
     const bObject = b !== null && typeof b === "object";
+    if (arrayKey && Array.isArray(a) && Array.isArray(b)) {
+      if (a.length + b.length > 20000 - visited) {
+        truncated = true;
+        return;
+      }
+      function index(items: unknown[]) {
+        const result = new Map<string, unknown>();
+        for (const item of items) {
+          visited++;
+          if (
+            !item ||
+            typeof item !== "object" ||
+            !Object.hasOwn(item, arrayKey)
+          )
+            return;
+          const value = (item as Record<string, unknown>)[arrayKey];
+          if (
+            (typeof value !== "number" && typeof value !== "string") ||
+            (typeof value === "number" && !Number.isFinite(value))
+          )
+            return;
+          const key = `${typeof value}:${String(value)}`;
+          if (result.has(key)) return;
+          result.set(key, item);
+        }
+        return result;
+      }
+      const left = index(a),
+        right = index(b);
+      if (left && right) {
+        for (const [key, value] of left) {
+          if (visited >= 20000 || changes.length >= 500) {
+            truncated = true;
+            break;
+          }
+          visit(
+            value,
+            right.get(key),
+            pointerChild(path, `${arrayKey}=${key}`),
+            depth + 1,
+          );
+        }
+        for (const [key, value] of right) {
+          if (left.has(key)) continue;
+          if (visited >= 20000 || changes.length >= 500) {
+            truncated = true;
+            break;
+          }
+          visit(
+            undefined,
+            value,
+            pointerChild(path, `${arrayKey}=${key}`),
+            depth + 1,
+          );
+        }
+        return;
+      }
+      if (warnings.length < 10)
+        warnings.push(
+          `${path || "/"}：对齐字段缺失、重复或不是字符串/数字，已回退按位置比较`,
+        );
+    }
     if (aObject && bObject && Array.isArray(a) === Array.isArray(b)) {
       const left = a as Record<string, unknown>;
       const right = b as Record<string, unknown>;
@@ -97,7 +160,7 @@ export function compareFields(before: unknown, after: unknown) {
     });
   }
   visit(before, after, "", 0);
-  return { changes, truncated };
+  return { changes, truncated, warnings };
 }
 
 /** 页码依据实际匹配条数，不依赖原始消息编号是否连续。 */

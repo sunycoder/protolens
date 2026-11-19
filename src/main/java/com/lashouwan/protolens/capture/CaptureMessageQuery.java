@@ -17,7 +17,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
-/** 对仓库持锁提供的记录执行过滤、排序和摘要分页；不做文件 IO，不修改记录。 */
+/** 对仓库发布的稳定消息视图执行过滤、排序和摘要分页；锁外计算，不修改消息。 */
 public final class CaptureMessageQuery {
     private static final Set<String> OMITTED_FIELDS =
             Set.of("body", "packetHex", "wireHex", "schema", "definition");
@@ -51,7 +51,16 @@ public final class CaptureMessageQuery {
 
         List<JsonNode> matching = new ArrayList<>();
         String keyword = query.toLowerCase(Locale.ROOT);
-        for (JsonNode node : capture.path("messages")) {
+        JsonNode messages = capture.path("messages");
+        // 原编号递增但可能有淘汰或间隙；二分定位序号下界，避免序号查询扫描整份消息体。
+        int lower = lowerBound(messages, from);
+        int upper = lowerBound(messages, to == Integer.MAX_VALUE ? to : to + 1);
+        if (!messageIndex.isBlank()) {
+            lower = lowerBound(messages, Integer.parseInt(messageIndex));
+            upper = Math.min(messages.size(), lower + 1);
+        }
+        for (int candidate = lower; candidate < upper; candidate++) {
+            JsonNode node = messages.path(candidate);
             int index = node.path("index").asInt();
             if (!messageIndex.isBlank() && !messageIndex.equals(Integer.toString(index))) {
                 continue;
@@ -72,10 +81,10 @@ public final class CaptureMessageQuery {
             if (hideHeartbeat && protocol.contains("SynchronizeTime")) {
                 continue;
             }
-            if (!include.isBlank() && !matchesProtocol(protocol, include)) {
+            if (!include.isBlank() && !matchesProtocol(node, protocol, include)) {
                 continue;
             }
-            if (!exclude.isBlank() && matchesProtocol(protocol, exclude)) {
+            if (!exclude.isBlank() && matchesProtocol(node, protocol, exclude)) {
                 continue;
             }
             if (!keyword.isBlank()) {
@@ -196,13 +205,41 @@ public final class CaptureMessageQuery {
         return String.join(" · ", matches);
     }
 
-    private boolean matchesProtocol(String protocol, String patterns) {
+    /** 快捷操作使用 id:/name: 精确标识；手工输入的普通词仍保留模糊包含语义。 */
+    private boolean matchesProtocol(JsonNode message, String protocol, String patterns) {
         String value = protocol.toLowerCase(Locale.ROOT);
         for (String pattern : patterns.split("[,，\\s]+")) {
+            if (pattern.startsWith("id:")) {
+                if (message.hasNonNull("protocolId")
+                        && pattern.substring(3).equals(message.path("protocolId").asText())) {
+                    return true;
+                }
+                continue;
+            }
+            if (pattern.startsWith("name:")) {
+                if (pattern.substring(5).equals(message.path("protocolName").asText())) {
+                    return true;
+                }
+                continue;
+            }
             if (!pattern.isBlank() && value.contains(pattern.toLowerCase(Locale.ROOT))) {
                 return true;
             }
         }
         return false;
+    }
+
+    private int lowerBound(JsonNode messages, int index) {
+        int low = 0;
+        int high = messages.size();
+        while (low < high) {
+            int middle = (low + high) >>> 1;
+            if (messages.path(middle).path("index").asInt() < index) {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        return low;
     }
 }

@@ -88,6 +88,11 @@ const nextStep = computed(() => {
       title: "尚未开始采集",
       hint: "点击“开始采集”，然后进入游戏执行要分析的操作。",
     };
+  if (state.value.source && state.value.receivedFrames > 0)
+    return {
+      title: "正在采集",
+      hint: `已收到 ${state.value.receivedFrames} 帧；点击消息只暂停列表跟随，后台采集继续。`,
+    };
   if (
     proxy.value?.supported &&
     !proxy.value.managed &&
@@ -103,8 +108,8 @@ const nextStep = computed(() => {
       hint: "重新进入游戏；已有游戏连接可能需要断开重连。",
     };
   return {
-    title: "正在采集",
-    hint: `已收到 ${state.value.receivedFrames} 帧；点击消息可暂停列表跟随，采集继续。`,
+    title: "采集源已接入，等待消息",
+    hint: "在游戏执行目标操作，确认消息数增加；可在连接与诊断查看最后接收时间。",
   };
 });
 async function refreshDiagnostics() {
@@ -340,6 +345,16 @@ onBeforeUnmount(() => {
             >{{ subscribed ? "页面推送正常" : "页面推送重连中" }} · 收到
             {{ state.receivedFrames }} 帧 · 去重 {{ state.duplicates }} · 缺号
             {{ state.missingEvents }}</span
+          >
+          <span class="muted"
+            >最后接收事件：{{
+              state.lastEventAt
+                ? new Date(state.lastEventAt).toLocaleString()
+                : "尚未收到"
+            }}</span
+          >
+          <span class="muted"
+            >证书是否已被游戏信任需按接入步骤验证，工作台无法自动确认。</span
           >
           <span class="muted">{{
             proxy?.managed

@@ -17,6 +17,19 @@ import CollectorSettingsPanel from "./CollectorSettingsPanel.vue";
 import MessageComparison from "./MessageComparison.vue";
 import HighlightedText from "./HighlightedText.vue";
 import MessageRowActions from "./MessageRowActions.vue";
+import ProtocolOverview from "./ProtocolOverview.vue";
+import TextPreview from "./TextPreview.vue";
+import { useQueryResults } from "./useQueryResults";
+import { useMessageSelection } from "./useMessageSelection";
+import {
+  readStored,
+  writeStored,
+  validQuery,
+  validPlace,
+  patchQuery,
+  type ReadingPlace,
+  type SavedView,
+} from "./workspaceSession";
 import {
   protocolChoice,
   mergeProtocolExclusions,
@@ -25,13 +38,13 @@ import {
 } from "./protocolSelection";
 import {
   defaultColumns,
+  defaultQuery,
   readColumns,
   listMinimumWidth,
   chooseDetailLayout,
   contextQuery,
   contextRankParams,
   allowReadingShortcut,
-  ResultPublication,
   type WorkspaceQuery,
   type DetailLayout,
 } from "./workspaceInteractions";
@@ -43,7 +56,6 @@ import {
 import { api, post, type Capture, type Packet, type Page } from "./types";
 import {
   reconcileRows,
-  RequestGate,
   shouldRefreshMessages,
   shouldCountUnread,
   type CaptureProgress,
@@ -56,23 +68,35 @@ const batchExcluding = ref(false);
 const selectedProtocols = shallowRef<ProtocolChoice[]>([]);
 const captures = shallowRef<Capture[]>([]);
 const capture = shallowRef<Capture>();
-const selected = shallowRef<Packet>();
-const rows = shallowRef<Packet[]>([]);
-const total = ref(0);
-const page = ref(1);
-const pageOffset = ref(0);
-const displayedPage = ref(1);
-const displayedQuery = shallowRef<WorkspaceQuery>();
-const pendingQuery = shallowRef<WorkspaceQuery>();
-const queryError = ref("");
-const displayedAt = ref("");
-const queryPublication = new ResultPublication<{
-  query: WorkspaceQuery;
-  result: Page;
-}>();
-const detailLoading = ref(false);
-const detailError = ref("");
-const detailTarget = shallowRef<Packet>();
+const {
+  rows,
+  total,
+  page,
+  pageOffset,
+  displayedPage,
+  displayedQuery,
+  pendingQuery,
+  queryError,
+  displayedAt,
+  queryPublication,
+  messageGate,
+  queryMetrics,
+} = useQueryResults();
+const {
+  selected,
+  selectedRowIndex,
+  detailLoading,
+  detailError,
+  detailTarget,
+  detailOpen,
+  detailGate,
+  detailCache,
+  detailMs,
+  selectDetail,
+} = useMessageSelection(
+  () => capture.value,
+  () => pauseListForInteraction(),
+);
 const expandedTags = ref(false);
 const columns = ref(readColumns(localStorage.getItem("analyzer.columns.v3")));
 const tableRevision = ref(0);
@@ -89,7 +113,6 @@ const interactiveLoading = ref(false);
 const sidebarCollapsed = ref(
   localStorage.getItem("analyzer.sidebarCollapsed") !== "false",
 );
-const detailOpen = ref(false);
 const focusMode = ref(false);
 const savedDock = localStorage.getItem("analyzer.layoutPreference.v3");
 const detailDock = ref<DetailLayout>(
@@ -380,15 +403,16 @@ async function captureStopped() {
   }
 }
 function onlyProtocol(row: Packet) {
-  include.value = String(row.protocolId || row.protocolName || "");
-  filter();
+  const choice = protocolChoice(row);
+  if (choice) void quickQuery({ include: choice.token, protocolId: "" });
 }
 function excludeProtocol(row: Packet) {
   const choice = protocolChoice(row);
   if (!choice) return;
-  pauseListForInteraction();
-  exclude.value = mergeProtocolExclusions(exclude.value, [choice]);
-  filter();
+  const shown = pendingQuery.value || displayedQuery.value || currentQuery();
+  void quickQuery({
+    exclude: mergeProtocolExclusions(shown.exclude, [choice]),
+  });
 }
 const direction = ref("");
 const status = ref("");
@@ -399,7 +423,7 @@ const dark = ref(localStorage.getItem("analyzer.dark") === "true");
 const localPath = ref("");
 const fileInput = ref<HTMLInputElement>();
 const selectedRange = ref("");
-const operation = ref({ name: "", from: 0, to: 0 });
+const operation = ref({ name: "", from: 0, to: 0, context: "" });
 const markDialog = ref(false);
 const operationStart = ref<{ captureId: string; index: number }>();
 async function beginOperation() {
@@ -437,6 +461,7 @@ async function endOperation() {
       name: "操作分析 · " + new Date().toLocaleString("sv-SE"),
       from: operationStart.value.index,
       to: item.lastIndex!,
+      context: "",
     };
     markDialog.value = true;
   } catch (error) {
@@ -455,7 +480,10 @@ async function freezeOperation() {
     operationStart.value = undefined;
     markDialog.value = false;
     await reloadCaptures();
-    if (capture.value?.id === id) await openCapture(frozen);
+    if (capture.value?.id === id) {
+      applyQuery({ ...defaultQuery, hideHeartbeat: false });
+      await openCapture(frozen);
+    }
     ElMessage.success("分析快照已保存，原连接继续采集，可将本记录交给 AI 查询");
   } catch (error) {
     failure(error);
@@ -463,17 +491,261 @@ async function freezeOperation() {
     busy.value = false;
   }
 }
+const workspaceView = ref<"messages" | "protocols">("messages");
+watch(workspaceView, (view) => {
+  if (view === "protocols") pauseListForInteraction();
+});
+const snapshotBusy = ref(false);
+const continuousBusy = ref(false);
+const savedSnapshot = ref<Capture>();
+const comparingPrevious = ref(false);
+const undoPlace = shallowRef<ReadingPlace>();
+const savedViews = ref<SavedView[]>(
+  readStored<unknown>("analyzer.views.v1", []) instanceof Array
+    ? readStored<SavedView[]>("analyzer.views.v1", [])
+        .filter(
+          (view) =>
+            view &&
+            typeof view.name === "string" &&
+            typeof view.dictionary === "string" &&
+            validQuery(view.query),
+        )
+        .slice(0, 12)
+    : [],
+);
+const viewDialog = ref(false);
+let restoringSession = true;
+
+function draftQuery(): WorkspaceQuery {
+  return {
+    ...currentQuery(),
+    q: search.value.trim(),
+    protocolId: protocolId.value.trim(),
+    messageIndex: messageIndex.value.trim(),
+    include: include.value.trim(),
+    exclude: exclude.value.trim(),
+  };
+}
+const hasDraft = computed(
+  () =>
+    !!displayedQuery.value &&
+    JSON.stringify(draftQuery()) !== JSON.stringify(displayedQuery.value),
+);
+function readingPlace(): ReadingPlace | undefined {
+  if (!capture.value || !displayedQuery.value) return;
+  return {
+    captureId: capture.value.id,
+    query: { ...displayedQuery.value },
+    page: displayedPage.value,
+    selectedIndex: selectedRowIndex.value,
+    scrollTop: tableScrollTop(),
+    detailOpen: detailOpen.value,
+    tab: tab.value,
+  };
+}
+function saveReadingPlace() {
+  if (restoringSession || loading.value) return;
+  const place = readingPlace();
+  if (place) writeStored("analyzer.reading.v1", place);
+}
+/** 保留输入草稿；只在查询成功后发布快捷操作及撤销位置。 */
+async function quickQuery(patch: Partial<WorkspaceQuery>) {
+  if (!capture.value) return;
+  const before = displayedQuery.value || currentQuery();
+  const base = pendingQuery.value || before;
+  const draft = draftQuery();
+  const previous = readingPlace();
+  const next = patchQuery(base, patch);
+  pauseListForInteraction();
+  browsingHistory.value = true;
+  await loadMessages(false, false, {
+    query: next,
+    page: 1,
+    onCommit: () => {
+      applyQuery(next);
+      if (draft.q !== before.q) search.value = draft.q;
+      if (draft.protocolId !== before.protocolId)
+        protocolId.value = draft.protocolId;
+      if (draft.messageIndex !== before.messageIndex)
+        messageIndex.value = draft.messageIndex;
+      if (draft.include !== before.include) include.value = draft.include;
+      if (draft.exclude !== before.exclude) exclude.value = draft.exclude;
+      undoPlace.value = previous;
+      workspaceView.value = "messages";
+    },
+  });
+}
+async function undoQuickQuery() {
+  const place = undoPlace.value;
+  if (!place || place.captureId !== capture.value?.id) return;
+  pauseListForInteraction();
+  await loadMessages(false, false, {
+    query: place.query,
+    page: place.page,
+    index: place.selectedIndex,
+    scrollTop: place.scrollTop,
+    onCommit: () => {
+      applyQuery(place.query);
+      undoPlace.value = undefined;
+    },
+  });
+  if (!queryError.value && capture.value?.id === place.captureId) {
+    detailOpen.value = place.detailOpen;
+    tab.value = place.tab;
+  }
+}
+function overviewSelection(rows: Packet[], action: "only" | "exclude") {
+  const choices = rows
+    .map(protocolChoice)
+    .filter((item): item is ProtocolChoice => !!item);
+  const base = pendingQuery.value || displayedQuery.value || currentQuery();
+  void quickQuery(
+    action === "only"
+      ? { include: mergeProtocolExclusions("", choices), protocolId: "" }
+      : { exclude: mergeProtocolExclusions(base.exclude, choices) },
+  );
+}
+async function saveCurrentSnapshot() {
+  const source = capture.value;
+  if (!source || snapshotBusy.value) return;
+  try {
+    const result = await ElMessageBox.prompt(
+      "保存当前仍保留的全部消息，源连接继续采集；已淘汰消息不能补回。",
+      "保存当前快照",
+      {
+        inputValue: source.name.slice(0, 70) + " · 快照",
+        inputValidator: (value) =>
+          (!!value?.trim() && value.length <= 100) || "请输入 1～100 字名称",
+      },
+    );
+    snapshotBusy.value = true;
+    savedSnapshot.value = await post<Capture>(
+      `/api/captures/${source.id}/snapshot-current`,
+      { name: result.value },
+    );
+    await reloadCaptures();
+    ElMessage.success("快照已保存，当前阅读位置和源连接保持");
+  } catch (error) {
+    if (error !== "cancel" && error !== "close") failure(error);
+  } finally {
+    snapshotBusy.value = false;
+  }
+}
+async function enableContinuous() {
+  const source = capture.value;
+  if (!source || continuousBusy.value) return;
+  continuousBusy.value = true;
+  try {
+    const result = await post<Capture>(
+      `/api/captures/${source.id}/continuous`,
+      {},
+    );
+    if (capture.value?.id === source.id) capture.value = result;
+    await reloadCaptures();
+    ElMessage.success(
+      "已启用持续落盘；内存继续按预算淘汰，磁盘记录可在停止或重启后读取",
+    );
+  } catch (error) {
+    failure(error);
+  } finally {
+    continuousBusy.value = false;
+  }
+}
+async function comparePrevious() {
+  const target = selected.value;
+  const id = capture.value?.id;
+  if (!target || !id || comparingPrevious.value) return;
+  comparingPrevious.value = true;
+  try {
+    const previous = await api<Packet>(
+      `/api/captures/${id}/previous/${target.index}`,
+    );
+    if (capture.value?.id !== id || selected.value?.index !== target.index)
+      return;
+    comparisonBase.value = previous;
+    comparisonDialog.value = true;
+  } catch (error) {
+    failure(error);
+  } finally {
+    comparingPrevious.value = false;
+  }
+}
+async function saveView() {
+  if (!displayedQuery.value) return;
+  try {
+    const result = await ElMessageBox.prompt(
+      "保存已生效筛选与当前列设置；不包含待提交草稿。",
+      "保存常用视图",
+      {
+        inputValidator: (value) =>
+          (!!value?.trim() && value.length <= 40) || "请输入 1～40 字名称",
+      },
+    );
+    const view: SavedView = {
+      name: result.value.trim(),
+      query: {
+        ...displayedQuery.value,
+        connection: "",
+        range: "",
+        messageIndex: "",
+      },
+      columns: { ...columns.value },
+      dictionary: capture.value?.catalog?.sha256 || "",
+    };
+    const next = [
+      view,
+      ...savedViews.value.filter((item) => item.name !== view.name),
+    ].slice(0, 12);
+    if (!writeStored("analyzer.views.v1", next))
+      throw new Error("本机存储不可用，视图未保存");
+    savedViews.value = next;
+    ElMessage.success("视图已保存，不包含连接和区间等记录专属条件");
+  } catch (error) {
+    if (error !== "cancel" && error !== "close") failure(error);
+  }
+}
+async function applyView(view: SavedView) {
+  if (view.dictionary && view.dictionary !== capture.value?.catalog?.sha256) {
+    try {
+      await ElMessageBox.confirm(
+        "此视图来自另一份协议字典，协议 ID 含义可能不同。确认应用？",
+        "字典不同",
+      );
+    } catch {
+      return;
+    }
+  }
+  await quickQuery(view.query);
+  if (!queryError.value) {
+    columns.value = readColumns(JSON.stringify(view.columns));
+    viewDialog.value = false;
+  }
+}
+function deleteView(name: string) {
+  const next = savedViews.value.filter((item) => item.name !== name);
+  if (writeStored("analyzer.views.v1", next)) savedViews.value = next;
+}
+watch(
+  [displayedQuery, selectedRowIndex, displayedPage, tab, detailOpen],
+  () => {
+    if (!restoringSession) saveReadingPlace();
+  },
+);
+watch(
+  () => capture.value?.id,
+  () => {
+    undoPlace.value = undefined;
+    workspaceView.value = "messages";
+  },
+);
+
 const importGuideDialog = ref(false);
 const errorText = ref("");
-const messageGate = new RequestGate();
-const detailGate = new RequestGate();
-const detailCache = new Map<string, Packet>();
 const autoFollow = ref(true);
 const browsingHistory = ref(false);
 const viewingTail = ref(false);
 const unread = shallowRef<Record<string, number>>({});
 const appliedSearch = ref("");
-const selectedRowIndex = ref<number>();
 function pauseListForInteraction() {
   autoFollow.value = false;
   pendingLive = false;
@@ -497,11 +769,10 @@ function toggleProtocolSelection(row: Packet) {
 }
 function excludeSelectedProtocols() {
   if (!selectedProtocols.value.length) return;
-  exclude.value = mergeProtocolExclusions(
-    exclude.value,
-    selectedProtocols.value,
-  );
-  filter();
+  const shown = pendingQuery.value || displayedQuery.value || currentQuery();
+  void quickQuery({
+    exclude: mergeProtocolExclusions(shown.exclude, selectedProtocols.value),
+  });
 }
 // 只有查询成功发布后才清理已排除的选择；失败时仍可查看选择并重试。
 watch(displayedQuery, (query) => {
@@ -917,6 +1188,16 @@ async function refreshLive(
       };
     });
     unread.value = nextUnread;
+    const activeId = capture.value?.id;
+    if (
+      activeId &&
+      capture.value?.diskFirstIndex !== undefined &&
+      changedIds.includes(activeId) &&
+      !autoFollow.value
+    ) {
+      const metadata = await api<Capture>(`/api/captures/${activeId}/overview`);
+      if (capture.value?.id === activeId) capture.value = metadata;
+    }
     if (
       shouldRefreshMessages(
         capture.value?.id,
@@ -1031,6 +1312,11 @@ async function loadMessages(
     displayedAt.value = new Date().toLocaleTimeString();
     capture.value = result.capture;
     viewingTail.value = tail;
+    queryMetrics.value = {
+      queryMs: result.queryMs || 0,
+      lockWaitMs: result.lockWaitMs || 0,
+      snapshotMs: result.snapshotMs || 0,
+    };
     if (navigation?.position !== undefined) {
       const target =
         navigation.position < 0
@@ -1082,11 +1368,14 @@ async function loadMessages(
     }
   }
 }
-async function openCapture(item: Capture) {
+async function openCapture(item: Capture, restore?: ReadingPlace) {
   if (!item.id) {
     failure(new Error(item.error || "记录不可用"));
     return;
   }
+  // 窄窗口的记录栏为浮层，选中后自动收起，避免遮住采集和分析按钮。
+  if (window.innerWidth < 1100) sidebarCollapsed.value = true;
+  undoPlace.value = undefined;
   messageGate.cancel();
   queryPublication.cancel();
   detailGate.cancel();
@@ -1114,9 +1403,80 @@ async function openCapture(item: Capture) {
   selectedRange.value = "";
   connection.value = "";
   page.value = 1;
-  await loadMessages(autoFollow.value && item.liveState === "CAPTURING");
+  if (restore && validPlace(restore)) {
+    applyQuery(restore.query);
+    autoFollow.value = false;
+    browsingHistory.value = true;
+    let restoredPage = restore.page;
+    if (restore.selectedIndex !== undefined) {
+      const params = new URLSearchParams({
+        ...restore.query,
+        hideHeartbeat: String(restore.query.hideHeartbeat),
+        limit: "1",
+      });
+      params.delete("range");
+      const mark = restore.query.range
+        ? item.marks[Number(restore.query.range) - 1]
+        : undefined;
+      if (mark) {
+        params.set("from", String(mark.from));
+        params.set("to", String(mark.to));
+      }
+      if (restore.query.order === "desc")
+        params.set(
+          "from",
+          String(Math.max(mark?.from ?? 0, restore.selectedIndex)),
+        );
+      else
+        params.set(
+          "to",
+          String(
+            Math.min(
+              mark?.to ?? Number.MAX_SAFE_INTEGER,
+              restore.selectedIndex,
+            ),
+          ),
+        );
+      const preceding = await api<Page>(
+        `/api/captures/${item.id}/messages?${params}`,
+      );
+      restoredPage = pageContaining(preceding.total);
+    }
+    await loadMessages(false, false, {
+      query: restore.query,
+      page: restoredPage,
+    });
+    if (capture.value?.id !== item.id || queryError.value) return;
+    if (!rows.value.length && total.value > 0) {
+      await loadMessages(false, false, {
+        page: Math.max(1, Math.ceil(total.value / 100)),
+      });
+      ElMessage.warning("原页码已超出保留范围，已定位到最近可用页面");
+    }
+    const target = rows.value.find(
+      (row) => row.index === restore.selectedIndex,
+    );
+    if (target) await select(target);
+    else if (restore.selectedIndex !== undefined) {
+      ElMessage.warning(
+        "原选中消息已不在此页或已淘汰；已恢复筛选与最近可用位置",
+      );
+      if (rows.value[0]) await select(rows.value[0]);
+    }
+    detailOpen.value = restore.detailOpen;
+    tab.value = ["tree", "json", "hex", "schema", "metadata"].includes(
+      restore.tab,
+    )
+      ? restore.tab
+      : "tree";
+    await nextTick();
+    packetTable.value?.setScrollTop(restore.scrollTop);
+  } else {
+    await loadMessages(autoFollow.value && item.liveState === "CAPTURING");
+  }
 }
 function filter() {
+  undoPlace.value = undefined;
   expandedTags.value = false;
   jumpTarget.value = undefined;
   locatedRow.value = undefined;
@@ -1323,71 +1683,15 @@ function openProtocol(row: Packet) {
 }
 async function select(row: Packet | undefined) {
   if (!row || !capture.value) return;
-  detailOpen.value = true;
-  if (
-    detailLoading.value &&
-    detailTarget.value?.index === row.index &&
-    detailTarget.value.connection === row.connection
-  )
-    return;
-  detailTarget.value = row;
-  detailError.value = "";
-  // 用户开始读某条消息后暂停列表跟随，后台采集继续；“回到最新”再恢复。
-  if (capture.value.liveState === "CAPTURING") autoFollow.value = false;
-  const id = capture.value.id;
-  const key = id + ":" + row.index;
-  selectedRowIndex.value = row.index;
   if (locatedRow.value !== row.index) locatedRow.value = undefined;
-  const request = detailGate.begin();
-  if (
-    selected.value?.index === row.index &&
-    selected.value.connection === row.connection
-  ) {
-    detailLoading.value = false;
-    return;
-  }
-  const cached = detailCache.get(key);
-  if (cached) {
-    selected.value = cached;
-    detailLoading.value = false;
-    return;
-  }
-  selected.value = undefined;
-  detailLoading.value = true;
-  const timer = setTimeout(() => {
-    if (request.current()) {
-      detailGate.cancel();
-      detailLoading.value = false;
-      detailError.value = `消息 #${row.index} 详情等待超时，可重试`;
-    }
-  }, 15000);
-  try {
-    const detail = await api<Packet>(
-      `/api/captures/${id}/messages/${row.index}`,
-      { signal: request.signal },
-    );
-    if (request.current() && capture.value?.id === id) {
-      selected.value = detail;
-      // 仅缓存小消息详情，大包体不长期驻留；上限 24 条且单条不超过 128 KiB。
-      if ((detail.bytes || 0) <= 128 * 1024) {
-        detailCache.set(key, detail);
-        if (detailCache.size > 24)
-          detailCache.delete(detailCache.keys().next().value!);
-      }
-    }
-  } catch (error) {
-    if (request.current())
-      detailError.value = `消息 #${row.index} 加载失败：${error instanceof Error ? error.message : String(error)}`;
-  } finally {
-    clearTimeout(timer);
-    if (request.current()) detailLoading.value = false;
-  }
+  await selectDetail(row);
 }
 watch(autoFollow, (value) => {
   if (value) {
     rowActions.value?.close();
     batchExcluding.value = false;
     selectedProtocols.value = [];
+    browsingHistory.value = false;
   }
   if (
     value &&
@@ -1397,6 +1701,8 @@ watch(autoFollow, (value) => {
     void loadMessages(true);
 });
 onBeforeUnmount(() => {
+  saveReadingPlace();
+  window.removeEventListener("beforeunload", saveReadingPlace);
   window.removeEventListener("resize", measureWorkspace);
   window.removeEventListener("keydown", handleWorkspaceKey);
   regionObserver?.disconnect();
@@ -1452,12 +1758,18 @@ async function upload(event: Event) {
 }
 async function mark() {
   if (!capture.value || busy.value) return;
+  const id = capture.value.id;
   busy.value = true;
   try {
-    capture.value = await post<Capture>(
-      `/api/captures/${capture.value.id}/marks`,
+    const marked = await post<Capture>(
+      `/api/captures/${id}/marks`,
       operation.value,
     );
+    if (capture.value?.id === id) {
+      capture.value = marked;
+      operationStart.value = undefined;
+      await quickQuery({ range: String(marked.marks.length) });
+    }
     markDialog.value = false;
     await reloadCaptures();
   } catch (error) {
@@ -1469,6 +1781,7 @@ async function mark() {
 function openMark() {
   operation.value = {
     name: "",
+    context: "",
     from: selected.value?.index ?? capture.value?.firstIndex ?? 0,
     to:
       selected.value?.index ??
@@ -1534,6 +1847,7 @@ async function copy() {
   }
 }
 onMounted(async () => {
+  window.addEventListener("beforeunload", saveReadingPlace);
   window.addEventListener("resize", measureWorkspace);
   window.addEventListener("keydown", handleWorkspaceKey);
   regionObserver = new ResizeObserver(() => measureWorkspace());
@@ -1547,8 +1861,18 @@ onMounted(async () => {
       settingsDialog.value = true;
     }
     await reloadCaptures();
-    const first = captures.value.find((item) => item.id);
-    if (first) await openCapture(first);
+    const saved = readStored<ReadingPlace | undefined>(
+      "analyzer.reading.v1",
+      undefined,
+    );
+    const previous = validPlace(saved)
+      ? captures.value.find((item) => item.id === saved.captureId)
+      : undefined;
+    const first = previous || captures.value.find((item) => item.id);
+    if (first) await openCapture(first, previous ? saved : undefined);
+    if (saved && !previous)
+      ElMessage.info("上次记录已删除或临时记录已结束，已打开可用记录");
+    restoringSession = false;
   } catch (error) {
     failure(error);
   }
@@ -1728,6 +2052,33 @@ onMounted(async () => {
             <strong :title="capture?.name">{{
               capture ? captureName(capture) : "选择或导入抓包"
             }}</strong>
+            <el-radio-group
+              v-model="workspaceView"
+              size="small"
+              aria-label="数据视图"
+            >
+              <el-radio-button value="messages">消息</el-radio-button>
+              <el-radio-button value="protocols" :disabled="!capture"
+                >协议概览</el-radio-button
+              >
+            </el-radio-group>
+            <span
+              v-if="capture"
+              class="muted retention-state"
+              :title="`已清空 ${capture.clearedCount || 0} 条；消息编号不重用`"
+            >
+              {{ capture.temporary ? "临时" : "已保存" }} · #{{
+                capture.firstIndex ?? 0
+              }}–{{ capture.lastIndex ?? 0 }}
+              <span v-if="capture.evictedCount">
+                · 内存淘汰 {{ capture.evictedCount }}</span
+              >
+              <span v-if="capture.diskFirstIndex !== undefined">
+                · 磁盘 #{{ capture.diskFirstIndex }}–{{
+                  capture.diskLastIndex
+                }}</span
+              >
+            </span>
             <el-popover trigger="hover" :width="300" placement="bottom-start">
               <template #reference
                 ><span class="capture-count"
@@ -1756,13 +2107,39 @@ onMounted(async () => {
               >上下文 #{{ locatedRow ?? selectedRowIndex }}</el-tag
             >
             <span
-              v-else-if="capture?.liveState === 'CAPTURING' && browsingHistory"
+              v-else-if="capture?.liveState === 'CAPTURING'"
               class="reading-hint"
               title="后台采集继续，新消息不会改变当前位置"
-              >已暂停跟随</span
+              >正在采集 ·
+              {{
+                autoFollow && !browsingHistory ? "跟随最新" : "阅读历史"
+              }}</span
             >
           </div>
           <div class="capture-actions">
+            <el-button
+              v-if="capture?.liveState === 'CAPTURING' && !capture.continuous"
+              size="small"
+              :loading="continuousBusy"
+              :disabled="!!capture.continuousError"
+              @click="enableContinuous"
+              >启用持续落盘</el-button
+            >
+            <span v-if="capture?.continuous" class="muted">持续落盘中</span>
+            <el-button
+              v-if="capture"
+              size="small"
+              :loading="snapshotBusy"
+              @click="saveCurrentSnapshot"
+              >保存当前快照</el-button
+            >
+            <el-button
+              v-if="savedSnapshot"
+              text
+              size="small"
+              @click="openCapture(savedSnapshot)"
+              >查看已存快照</el-button
+            >
             <el-dropdown v-if="searchOrigin && contextAnchor" trigger="click"
               ><el-button size="small">{{
                 contextScope === "connection"
@@ -1795,7 +2172,11 @@ onMounted(async () => {
               >返回搜索结果</el-button
             >
             <el-button
-              v-if="capture?.temporary && capture.liveState !== 'CAPTURING'"
+              v-if="
+                capture &&
+                (capture.temporary || capture.diskFirstIndex !== undefined) &&
+                capture.liveState !== 'CAPTURING'
+              "
               size="small"
               type="primary"
               @click="saveCapture"
@@ -1948,6 +2329,16 @@ onMounted(async () => {
               />
             </el-select>
             <el-button @click="filterDialog = true">协议过滤</el-button>
+            <el-button @click="viewDialog = true">常用视图</el-button>
+            <el-button
+              v-if="undoPlace"
+              :disabled="interactiveLoading"
+              @click="undoQuickQuery"
+              >撤销筛选操作</el-button
+            >
+            <span v-if="hasDraft" class="muted" role="status"
+              >输入有待提交条件</span
+            >
             <el-button
               :type="batchExcluding ? 'primary' : 'default'"
               :disabled="!capture"
@@ -2099,8 +2490,24 @@ onMounted(async () => {
             >退出专注</el-button
           >
         </div>
+        <div
+          v-if="capture?.continuousError || capture?.recoveryWarning"
+          class="error-bar"
+          role="alert"
+        >
+          {{
+            capture.continuousError || capture.recoveryWarning
+          }}；请核对磁盘与内存保留范围。
+        </div>
         <div ref="dataRegion" class="data-region">
+          <ProtocolOverview
+            v-if="workspaceView === 'protocols' && capture"
+            :capture-id="capture.id"
+            @only="overviewSelection($event, 'only')"
+            @exclude="overviewSelection($event, 'exclude')"
+          />
           <SplitPane
+            v-show="workspaceView === 'messages'"
             ref="splitPane"
             class="data-split"
             :direction="detailDirection"
@@ -2424,6 +2831,20 @@ onMounted(async () => {
                     :disabled="!hasNext || interactiveLoading"
                     >下一条</el-button
                   >
+                  <el-button
+                    v-if="selected"
+                    text
+                    size="small"
+                    :loading="comparingPrevious"
+                    @click="comparePrevious"
+                    >对比上一条同协议</el-button
+                  >
+                  <span
+                    v-if="selected"
+                    class="muted"
+                    :title="`查询 ${queryMetrics.queryMs.toFixed(1)}ms · 等锁 ${queryMetrics.lockWaitMs.toFixed(1)}ms · 快照 ${queryMetrics.snapshotMs.toFixed(1)}ms`"
+                    >详情 {{ detailMs.toFixed(0) }}ms</span
+                  >
                   <el-popover
                     v-if="selected"
                     trigger="click"
@@ -2489,6 +2910,12 @@ onMounted(async () => {
                   >
                 </div>
                 <template v-if="selected">
+                  <p
+                    v-if="capture?.operationContext"
+                    class="muted operation-context"
+                  >
+                    操作背景：{{ capture.operationContext }}
+                  </p>
                   <details
                     v-if="detailQuery && selected"
                     class="field-matches"
@@ -2550,9 +2977,9 @@ onMounted(async () => {
                       </div></el-tab-pane
                     >
                     <el-tab-pane label="JSON 文本" name="json">
-                      <pre v-if="tab === 'json'" class="detail-content">{{
-                        bodyText
-                      }}</pre>
+                      <div v-if="tab === 'json'" class="detail-content">
+                        <TextPreview :value="selected.body" />
+                      </div>
                     </el-tab-pane>
                     <el-tab-pane label="原始包体" name="hex"
                       ><div v-if="tab === 'hex'" class="detail-content">
@@ -2560,7 +2987,7 @@ onMounted(async () => {
                           解压后的完整业务包（消息头 + Thrift Compact
                           消息体；头长见元数据 headerBytes）
                         </p>
-                        <pre>{{ packetHexText }}</pre>
+                        <TextPreview :value="selected.packetHex" format="hex" />
                         <p class="muted">
                           {{
                             selected?.inputFormat === "DECOMPRESSED_MESSAGE"
@@ -2568,9 +2995,11 @@ onMounted(async () => {
                               : "SAZ 中的原始 WebSocket 帧（包含帧头、掩码与压缩字节）"
                           }}
                         </p>
-                        <pre>{{ wireHexText }}</pre>
-                      </div></el-tab-pane
-                    >
+                        <TextPreview
+                          :value="selected.wireHex"
+                          format="hex"
+                        /></div
+                    ></el-tab-pane>
                     <el-tab-pane label="字段定义" name="schema"
                       ><div v-if="tab === 'schema'" class="detail-content">
                         <p class="muted">
@@ -2606,6 +3035,28 @@ onMounted(async () => {
       </main>
     </div>
     <el-dialog
+      v-model="viewDialog"
+      title="常用分析视图"
+      width="min(600px,94vw)"
+    >
+      <p class="muted">
+        保存已生效筛选和显示列；不保存消息、连接、区间或未提交输入。最多 12
+        个，同名覆盖。
+      </p>
+      <el-button :disabled="!displayedQuery" @click="saveView"
+        >保存当前视图</el-button
+      >
+      <p v-if="!savedViews.length" class="muted">尚未保存视图</p>
+      <div v-for="view in savedViews" :key="view.name" class="saved-view-row">
+        <strong>{{ view.name }}</strong
+        ><span class="muted"
+          >字典 {{ view.dictionary?.slice(0, 12) || "未知" }}</span
+        >
+        <el-button :disabled="!capture" @click="applyView(view)">应用</el-button
+        ><el-button text @click="deleteView(view.name)">删除</el-button>
+      </div>
+    </el-dialog>
+    <el-dialog
       v-model="comparisonDialog"
       title="消息字段变化对比"
       width="min(1000px, 95vw)"
@@ -2630,6 +3081,13 @@ onMounted(async () => {
             v-model="operation.name"
             maxlength="100"
             placeholder="例如：联盟科技捐献一次" /></el-form-item
+        ><el-form-item label="操作背景"
+          ><el-input
+            v-model="operation.context"
+            type="textarea"
+            :rows="2"
+            maxlength="2000"
+            placeholder="操作前状态、执行动作和想确认的问题（随快照保存）" /></el-form-item
         ><el-form-item label="起始序号 #"
           ><el-input-number
             v-model="operation.from"
@@ -2648,6 +3106,8 @@ onMounted(async () => {
             " /></el-form-item></el-form
       ><template #footer
         ><el-button @click="markDialog = false">取消</el-button
+        ><el-button type="primary" :loading="busy" @click="freezeOperation"
+          >保存快照并分析</el-button
         ><el-button type="primary" :loading="busy" @click="mark"
           >保存区间</el-button
         ></template
@@ -2655,8 +3115,9 @@ onMounted(async () => {
     >
     <el-dialog v-model="filterDialog" title="协议过滤" width="540px">
       <p class="muted">
-        协议名或协议 ID
-        支持多个条件，用逗号分隔；同组任一匹配，排除优先。与搜索、方向、状态和操作区间同时生效。
+        协议名或协议 ID 普通词按模糊包含匹配；id:12 精确匹配协议
+        ID，name:GcUpdate
+        精确匹配协议名。支持逗号分隔，同组任一匹配、排除优先。行内与批量快捷操作自动使用精确条件。
       </p>
       <el-form label-width="90px">
         <el-form-item label="仅包含"

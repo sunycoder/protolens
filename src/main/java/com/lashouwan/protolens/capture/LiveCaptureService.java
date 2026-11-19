@@ -134,7 +134,10 @@ public final class LiveCaptureService implements AutoCloseable {
                         .put("version", version);
         int sessionMessages = 0;
         for (String id : currentRoundCaptures) {
-            sessionMessages += captures.liveSummary(id).path("messageCount").asInt();
+            ObjectNode summary = captures.liveSummary(id);
+            if (summary.path("temporary").asBoolean()) {
+                sessionMessages += summary.path("messageCount").asInt();
+            }
         }
         result.put("sessionMessageCount", sessionMessages);
         ArrayNode active = result.putArray("connections");
@@ -399,12 +402,12 @@ public final class LiveCaptureService implements AutoCloseable {
     /** 清空本次采集的消息但保留每条记录与连接；不重置压缩字典、传输去重或原始编号。 */
     public synchronized ObjectNode clearSession() {
         Set<String> ids = new LinkedHashSet<>(currentRoundCaptures);
-        captures.clearTemporary(ids);
+        Set<String> cleared = captures.clearTemporary(ids);
         received = 0;
         version++;
         publish();
         ObjectNode result = status();
-        result.set("clearedCaptureIds", mapper.valueToTree(ids));
+        result.set("clearedCaptureIds", mapper.valueToTree(cleared));
         return result;
     }
 

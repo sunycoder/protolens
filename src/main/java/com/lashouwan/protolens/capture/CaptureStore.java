@@ -15,6 +15,7 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
@@ -25,6 +26,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -160,26 +162,36 @@ public final class CaptureStore {
     }
 
     /** AI 先查看协议分布再缩小检索，不需要翻阅上万条摘要；分组数量有返回上限。 */
-    public synchronized ObjectNode analysisOverview(String id) throws IOException {
-        ObjectNode capture = load(id);
-        ObjectNode result = summary(capture);
+    public ObjectNode analysisOverview(String id) throws IOException {
+        ObjectNode capture;
+        ObjectNode result;
+        synchronized (this) {
+            capture = queryView(id);
+            result = summary(capture);
+        }
         Map<String, ObjectNode> groups = new HashMap<>();
         for (JsonNode message : capture.path("messages")) {
             String key =
-                    message.path("direction").asText() + ":" + message.path("protocolId").asText();
+                    message.path("direction").asText()
+                            + ":"
+                            + (message.hasNonNull("protocolId")
+                                    ? "id:" + message.path("protocolId").asText()
+                                    : "name:" + message.path("protocolName").asText());
             ObjectNode group = groups.get(key);
             if (group == null) {
                 group =
                         mapper.createObjectNode()
                                 .put("direction", message.path("direction").asText())
-                                .put("protocolId", message.path("protocolId").asInt())
                                 .put("protocolName", message.path("protocolName").asText())
                                 .put("count", 0)
                                 .put("firstIndex", message.path("index").asInt());
                 groups.put(key, group);
+                if (message.hasNonNull("protocolId"))
+                    group.set("protocolId", message.path("protocolId"));
             }
             group.put("count", group.path("count").asInt() + 1)
-                    .put("lastIndex", message.path("index").asInt());
+                    .put("lastIndex", message.path("index").asInt())
+                    .put("lastTime", message.path("time").asText());
         }
         List<ObjectNode> distribution = new ArrayList<>(groups.values());
         distribution.sort(
@@ -211,11 +223,53 @@ public final class CaptureStore {
     }
 
     /** 一次操作的区间按原编号冻结并发布新记录，源连接继续采集；已淘汰边界明确拒绝。 */
-    public synchronized ObjectNode snapshotRange(String id, String name, int from, int to)
+    public ObjectNode snapshotRange(String id, String name, int from, int to) throws IOException {
+        return snapshotRange(id, name, from, to, "");
+    }
+
+    /** 先冻结区间再在锁外发布新文件；磁盘失败不改变源记录，调用方可保留输入重试。 */
+    public ObjectNode snapshotRange(String id, String name, int from, int to, String context)
+            throws IOException {
+        ObjectNode frozen;
+        synchronized (this) {
+            frozen = freezeRange(id, name, from, to, context);
+        }
+        save(frozen);
+        synchronized (this) {
+            return summary(frozen);
+        }
+    }
+
+    /** 截止当前的边界在同一把锁内确定，不受浏览器旧计数或源连接追加、淘汰影响。 */
+    public ObjectNode snapshotCurrent(String id, String name) throws IOException {
+        ObjectNode frozen;
+        synchronized (this) {
+            ObjectNode source = load(id);
+            JsonNode messages = source.path("messages");
+            if (messages.isEmpty()) {
+                throw new IllegalArgumentException("当前没有可保存的消息");
+            }
+            frozen =
+                    freezeRange(
+                            id,
+                            name,
+                            messages.path(0).path("index").asInt(),
+                            messages.path(messages.size() - 1).path("index").asInt(),
+                            "");
+        }
+        save(frozen);
+        synchronized (this) {
+            return summary(frozen);
+        }
+    }
+
+    /** 仅由持锁入口调用；保留原编号、字典和来源，背景说明不超过 2000 字。 */
+    private ObjectNode freezeRange(String id, String name, int from, int to, String context)
             throws IOException {
         ObjectNode source = load(id);
         JsonNode messages = source.path("messages");
-        if (name.isBlank()
+        if (context.length() > 2000
+                || name.isBlank()
                 || name.length() > 100
                 || messages.isEmpty()
                 || from < 0
@@ -238,6 +292,9 @@ public final class CaptureStore {
                 .put("temporary", false)
                 .put("liveState", CaptureState.STOPPED.name())
                 .put("analysisSnapshot", true);
+        frozen.put("operationContext", context.trim());
+        frozen.put("continuous", false);
+        frozen.remove(List.of("diskFirstIndex", "diskLastIndex", "continuousError"));
         frozen.putObject("snapshotSource")
                 .put("captureId", id)
                 .put("from", from)
@@ -272,8 +329,7 @@ public final class CaptureStore {
             }
             ((ObjectNode) connection).put("messages", count);
         }
-        save(frozen);
-        return summary(frozen);
+        return frozen;
     }
 
     private ObjectNode load(String id) throws IOException {
@@ -285,7 +341,13 @@ public final class CaptureStore {
         if (cachedCapture != null && cachedCapture.path("id").asText().equals(id)) {
             return cachedCapture;
         }
-        cachedCapture = (ObjectNode) mapper.readTree(path(id).toFile());
+        cachedCapture = readArchive(id);
+        return cachedCapture;
+    }
+
+    /** 回放已保存基线及逐条追加日志；按原始编号衔接，尾部截断不掩盖已保存证据。 */
+    private ObjectNode readArchive(String id) throws IOException {
+        ObjectNode restored = (ObjectNode) mapper.readTree(path(id).toFile());
         Path journal = directory.resolve(id + ".journal");
         if (Files.isRegularFile(journal)) {
             // 崩溃后仅回放完整日志行；末行写入中断不丢弃前面的已确认消息。
@@ -294,22 +356,69 @@ public final class CaptureStore {
                 while ((line = reader.readLine()) != null) {
                     try {
                         JsonNode message = mapper.readTree(line);
-                        if (message.path("index").asInt(-1)
-                                == cachedCapture.withArray("messages").size()) {
-                            cachedCapture.withArray("messages").add(message);
+                        ArrayNode messages = restored.withArray("messages");
+                        int expected =
+                                messages.isEmpty()
+                                        ? restored.path("firstIndex").asInt()
+                                        : messages.path(messages.size() - 1).path("index").asInt()
+                                                + 1;
+                        int index = message.path("index").asInt(-1);
+                        if (index == expected) {
+                            messages.add(message);
+                        } else if (index > expected || index < 0) {
+                            restored.put("recoveryWarning", "实时日志编号中断，已保留前序完整消息");
+                            break;
                         }
                     } catch (IOException failure) {
-                        cachedCapture.put("recoveryWarning", "实时日志包含截断记录，已保留前序完整消息");
+                        restored.put("recoveryWarning", "实时日志包含截断记录，已保留前序完整消息");
                         break;
                     }
                 }
             }
-            cachedCapture.put("liveState", CaptureState.INTERRUPTED.name());
+            restored.put("liveState", CaptureState.INTERRUPTED.name());
         }
-        if (cachedCapture.path("liveState").asText().equals(CaptureState.CAPTURING.name())) {
-            cachedCapture.put("liveState", CaptureState.INTERRUPTED.name());
+        if (restored.path("liveState").asText().equals(CaptureState.CAPTURING.name())) {
+            restored.put("liveState", CaptureState.INTERRUPTED.name());
         }
-        return cachedCapture;
+        restored.put("continuous", false).put("temporary", false);
+        if (restored.has("diskFirstIndex") && !restored.path("messages").isEmpty()) {
+            int last =
+                    restored.path("messages")
+                            .path(restored.path("messages").size() - 1)
+                            .path("index")
+                            .asInt();
+            restored.put("diskLastIndex", last).put("totalReceived", last + 1);
+        }
+        restored.setAll(summary(restored, false));
+        return restored;
+    }
+
+    /** 用户显式启用后先原子保存当前保留范围，以后逐条追加日志；不追补启用前已淘汰的消息。 文件提交失败不改变内存采集状态；成功后才标记启用。日志顺序由仓库锁保证。 */
+    public synchronized ObjectNode enableContinuous(String id) throws IOException {
+        ObjectNode source = liveCaptures.get(id);
+        if (source == null
+                || !source.path("liveState").asText().equals(CaptureState.CAPTURING.name())) {
+            throw new IllegalArgumentException("仅可为正在采集的记录启用持续落盘");
+        }
+        if (source.path("continuous").asBoolean()) {
+            return summary(source);
+        }
+        if (source.has("continuousError")) {
+            throw new IllegalArgumentException("本记录落盘曾失败，请先停止并核对已保存内容，再开始新记录");
+        }
+        ObjectNode baseline = load(id).deepCopy();
+        int first = baseline.path("firstIndex").asInt();
+        int last = baseline.path("lastIndex").asInt(-1);
+        baseline.put("continuous", true)
+                .put("temporary", false)
+                .put("diskFirstIndex", first)
+                .put("diskLastIndex", last);
+        save(baseline);
+        source.put("continuous", true)
+                .put("temporary", false)
+                .put("diskFirstIndex", first)
+                .put("diskLastIndex", last);
+        return summary(source);
     }
 
     /** 握手后仅创建内存记录；用户选择保存之前不产生抓包文件或增量日志。 */
@@ -362,7 +471,23 @@ public final class CaptureStore {
             throw new IllegalArgumentException("实时记录已停止");
         }
         LiveMessageBuffer buffer = liveBuffers.get(id);
-        buffer.append(message, mapper);
+        ObjectNode appended = buffer.append(message, mapper);
+        if (capture.path("continuous").asBoolean()) {
+            try {
+                // 一行一个原编号消息，不重复重写整份抓包；关闭文件后再报告该编号已写入。
+                Files.writeString(
+                        directory.resolve(id + ".journal"),
+                        mapper.writeValueAsString(appended) + "\n",
+                        StandardCharsets.UTF_8,
+                        StandardOpenOption.CREATE,
+                        StandardOpenOption.APPEND);
+                capture.put("diskLastIndex", appended.path("index").asInt());
+            } catch (IOException failure) {
+                // 保留已落盘范围和内存采集，停止追加以免在截断尾部后续写并误称完整。
+                capture.put("continuous", false)
+                        .put("continuousError", "持续落盘失败：" + failure.getMessage());
+            }
+        }
         buffer.describe(capture);
         // 查询可能物化了数组；追加后释放旧数组引用，淘汰对象才可被 GC 回收。
         capture.putArray("messages");
@@ -378,6 +503,14 @@ public final class CaptureStore {
         ObjectNode capture = liveCaptures.get(id);
         if (capture != null) {
             capture.put("liveState", state);
+            if (capture.has("diskFirstIndex")) {
+                try {
+                    // 持续落盘记录在停止/断开时合并日志，记录真实终态；失败仍保留基线、日志和内存。
+                    persistLive(id, capture.path("name").asText());
+                } catch (IOException failure) {
+                    capture.put("continuousError", "停止时合并落盘记录失败：" + failure.getMessage());
+                }
+            }
         }
     }
 
@@ -387,12 +520,40 @@ public final class CaptureStore {
         if (capture.path("liveState").asText().equals(CaptureState.CAPTURING.name())) {
             throw new IllegalArgumentException("请先停止采集再保存记录");
         }
+        if (capture.has("diskFirstIndex")) {
+            ObjectNode archive = readArchive(id);
+            // 内存窗口可以淘汰，完整保存使用磁盘范围；落盘失败后内存仍保留的尾部一并补入。
+            ArrayNode all = archive.withArray("messages");
+            int last = all.isEmpty() ? -1 : all.path(all.size() - 1).path("index").asInt();
+            for (JsonNode message : capture.path("messages")) {
+                if (message.path("index").asInt() > last) {
+                    if (message.path("index").asInt() != last + 1) {
+                        capture.put("recoveryWarning", "落盘失败后部分消息已从内存淘汰，保存内容存在编号缺口");
+                    }
+                    all.add(message.deepCopy());
+                    last = message.path("index").asInt();
+                }
+            }
+            capture.set("messages", all);
+            capture.put("continuous", false)
+                    .put("memoryEvictedCount", capture.path("evictedCount").asLong())
+                    .put("evictedCount", archive.path("evictedCount").asLong())
+                    .put("diskLastIndex", last);
+            if (archive.has("recoveryWarning"))
+                capture.set("recoveryWarning", archive.path("recoveryWarning"));
+        }
         String title = name == null || name.isBlank() ? capture.path("name").asText() : name.trim();
         if (title.length() > 100) {
             throw new IllegalArgumentException("记录名称不能超过 100 字");
         }
         capture.put("name", title).put("temporary", false);
+        capture.setAll(summary(capture, false));
+        for (JsonNode mark : capture.withArray("marks")) {
+            ((ObjectNode) mark)
+                    .put("expired", mark.path("from").asInt() < capture.path("firstIndex").asInt());
+        }
         save(capture);
+        Files.deleteIfExists(directory.resolve(id + ".journal"));
         liveCaptures.remove(id);
         liveBuffers.remove(id);
         return summary(capture);
@@ -400,10 +561,11 @@ public final class CaptureStore {
 
     /** 活跃记录不能删除；关闭记录清除快照、旧日志和摘要，同时失效内存缓存。 */
     /** 清空本轮临时记录的消息和标记，保留记录 ID、字典、连接及名称，绝不修改历史文件。 */
-    public synchronized void clearTemporary(Set<String> ids) {
+    public synchronized Set<String> clearTemporary(Set<String> ids) {
+        Set<String> cleared = new LinkedHashSet<>();
         for (String id : ids) {
             ObjectNode capture = liveCaptures.get(id);
-            if (capture == null) {
+            if (capture == null || !capture.path("temporary").asBoolean()) {
                 continue;
             }
             LiveMessageBuffer buffer = liveBuffers.get(id);
@@ -412,7 +574,9 @@ public final class CaptureStore {
             capture.putArray("messages");
             capture.putArray("marks");
             capture.put("clearedAt", Instant.now().toString());
+            cleared.add(id);
         }
+        return cleared;
     }
 
     public synchronized ObjectNode delete(String id) throws IOException {
@@ -433,22 +597,102 @@ public final class CaptureStore {
     }
 
     /** 列表只传输摘要，查询条件与筛选算法独立于持久化和实时缓存。 */
-    public synchronized ObjectNode messages(String id, MessageQuery query) throws IOException {
-        ObjectNode capture = load(id);
-        return messageQuery.messages(capture, query, summary(capture));
+    public ObjectNode messages(String id, MessageQuery query) throws IOException {
+        long started = System.nanoTime();
+        ObjectNode capture;
+        ObjectNode metadata;
+        long acquired;
+        long released;
+        synchronized (this) {
+            acquired = System.nanoTime();
+            String exactProtocol = query.protocolId();
+            if (exactProtocol.isBlank() && query.include().matches("id:[0-9]+")) {
+                exactProtocol = query.include().substring(3);
+            }
+            if (!exactProtocol.isBlank() && liveBuffers.containsKey(id)) {
+                capture = summary(liveCaptures.get(id));
+                capture.set(
+                        "messages", liveBuffers.get(id).protocolSnapshot(exactProtocol, mapper));
+            } else {
+                capture = queryView(id);
+            }
+            metadata = summary(capture);
+            released = System.nanoTime();
+        }
+        ObjectNode result = messageQuery.messages(capture, query, metadata);
+        result.put("lockWaitMs", (acquired - started) / 1_000_000.0)
+                .put("snapshotMs", (released - acquired) / 1_000_000.0)
+                .put("queryMs", (System.nanoTime() - released) / 1_000_000.0);
+        return result;
+    }
+
+    /** 消息在追加时已防御性复制，发布后不再修改；数组也在每次读取时独立物化。 锁内只捕获消息引用与元信息，不复制大消息体；后续追加、清空和标记替换不会改写本视图。 */
+    private ObjectNode queryView(String id) throws IOException {
+        ObjectNode source = load(id);
+        ObjectNode view = summary(source);
+        view.set("messages", source.path("messages"));
+        return view;
+    }
+
+    /** 同一连接、方向及协议的前一条消息；不应用列表筛选，不推断请求响应关系。 */
+    public JsonNode previousSameProtocol(String id, int index) throws IOException {
+        ObjectNode view;
+        synchronized (this) {
+            view = queryView(id);
+        }
+        JsonNode messages = view.path("messages");
+        JsonNode target = null;
+        for (int position = messages.size() - 1; position >= 0; position--) {
+            JsonNode candidate = messages.path(position);
+            if (candidate.path("index").asInt() == index) {
+                target = candidate;
+                continue;
+            }
+            if (target == null || candidate.path("index").asInt() >= index) {
+                continue;
+            }
+            if (candidate.path("connection").equals(target.path("connection"))
+                    && candidate.path("direction").equals(target.path("direction"))
+                    && (target.hasNonNull("protocolId")
+                            ? candidate.path("protocolId").equals(target.path("protocolId"))
+                            : target.hasNonNull("protocolName")
+                                    && candidate
+                                            .path("protocolName")
+                                            .equals(target.path("protocolName")))) {
+                return candidate.deepCopy();
+            }
+        }
+        if (target == null) {
+            throw new IllegalArgumentException("目标消息已清空或淘汰，请刷新列表");
+        }
+        throw new IllegalArgumentException("保留范围内没有同连接、同方向、同协议的上一条消息");
     }
 
     public synchronized JsonNode detail(String id, int index) throws IOException {
-        ObjectNode capture = load(id);
-        JsonNode messages = capture.path("messages");
-        int first = messages.isEmpty() ? 0 : messages.path(0).path("index").asInt();
-        int position = index - first;
-        if (position < 0
-                || position >= messages.size()
-                || messages.path(position).path("index").asInt() != index) {
+        ObjectNode capture;
+        JsonNode message;
+        if (liveBuffers.containsKey(id)) {
+            capture = liveCaptures.get(id);
+            message = liveBuffers.get(id).messageAt(index);
+        } else {
+            capture = load(id);
+            JsonNode messages = capture.path("messages");
+            int low = 0;
+            int high = messages.size();
+            while (low < high) {
+                int middle = (low + high) >>> 1;
+                if (messages.path(middle).path("index").asInt() < index) low = middle + 1;
+                else high = middle;
+            }
+            message =
+                    low < messages.size() && messages.path(low).path("index").asInt() == index
+                            ? messages.path(low)
+                            : null;
+        }
+        if (message == null) {
             throw new IllegalArgumentException("消息不存在、已被清空或已被缓存淘汰，请刷新列表");
         }
-        ObjectNode detail = (ObjectNode) messages.path(position).deepCopy();
+        ObjectNode detail = (ObjectNode) message.deepCopy();
         String protocolId = detail.path("protocolId").asText();
         detail.set(
                 "schema",
@@ -489,6 +733,11 @@ public final class CaptureStore {
     }
 
     private ObjectNode summary(ObjectNode capture) {
+        return summary(capture, true);
+    }
+
+    /** 磁盘快照的统计必须依据该快照，不能被同 ID 的活动内存窗口覆盖。 */
+    private ObjectNode summary(ObjectNode capture, boolean useLiveBuffer) {
         ObjectNode result = mapper.createObjectNode();
         Iterator<Map.Entry<String, JsonNode>> fields = capture.fields();
         while (fields.hasNext()) {
@@ -497,7 +746,7 @@ public final class CaptureStore {
                 result.set(field.getKey(), field.getValue().deepCopy());
             }
         }
-        if (liveBuffers.containsKey(capture.path("id").asText())) {
+        if (useLiveBuffer && liveBuffers.containsKey(capture.path("id").asText())) {
             liveBuffers.get(capture.path("id").asText()).describe(result);
             return result;
         }
@@ -540,12 +789,18 @@ public final class CaptureStore {
             } catch (AtomicMoveNotSupportedException ignored) {
                 Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
             }
-            cachedCapture = capture;
+            synchronized (this) {
+                cachedCapture = capture;
+            }
             // 摘要是可重建缓存；写入失败不把已成功发布的完整抓包误报为失败。
             Path metadata = directory.resolve(capture.path("id").asText() + ".meta");
             Path metadataTemporary = Files.createTempFile(directory, "metadata-", ".tmp");
             try {
-                mapper.writeValue(metadataTemporary.toFile(), summary(capture));
+                ObjectNode metadataValue;
+                synchronized (this) {
+                    metadataValue = summary(capture, false);
+                }
+                mapper.writeValue(metadataTemporary.toFile(), metadataValue);
                 Files.move(metadataTemporary, metadata, StandardCopyOption.REPLACE_EXISTING);
             } catch (IOException failure) {
                 Files.deleteIfExists(metadata);

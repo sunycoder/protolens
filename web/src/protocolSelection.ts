@@ -10,7 +10,8 @@ export function protocolChoice(row: {
 }): ProtocolChoice | undefined {
   const name = row.protocolName?.trim();
   if (row.protocolId === undefined && !name) return;
-  const token = name || String(row.protocolId);
+  const token =
+    row.protocolId === undefined ? `name:${name}` : `id:${row.protocolId}`;
   return {
     key: row.protocolId === undefined ? `name:${name}` : `id:${row.protocolId}`,
     token,

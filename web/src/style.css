@@ -29,6 +29,38 @@
 * {
   box-sizing: border-box;
 }
+.saved-view-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.saved-view-row strong {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+.retention-state {
+  white-space: nowrap;
+}
+.operation-context {
+  margin: 0;
+  padding: 6px 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 90px;
+  overflow: auto;
+}
+.data-region > .protocol-overview {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  background: var(--surface);
+}
+.reading-hint {
+  white-space: nowrap;
+}
 body {
   margin: 0;
 }
