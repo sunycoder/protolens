@@ -230,6 +230,17 @@ tasks.register('verifyDistribution') {
     }
 }
 
+// jpackage 会逐个重签输入目录中的可执行文件，无法处理第三方应用的脚本启动入口。
+// 先生成仅含主应用的镜像，再原样嵌入已验证的官方采集器应用，保留其完整签名和链接结构。
+tasks.register('stageMacPackageInput', Sync) {
+    dependsOn 'verifyDistribution'
+    onlyIf { analyzerPlatform.os == 'macos' }
+    from(layout.buildDirectory.dir('distribution-input')) {
+        exclude 'runtime-tools/mitmproxy.app/**'
+    }
+    into layout.buildDirectory.dir('macos-package-input')
+}
+
 // 可指定独立输出目录，以便构建新版本时不覆盖仍在运行的便携版。
 def analyzerReleaseRoot = providers.gradleProperty('analyzerReleaseDir')
         .map { file(it) }.getOrElse(layout.buildDirectory.get().asFile)
@@ -298,6 +309,7 @@ tasks.register('verifyPackagingPlatform') {
 
 tasks.register('packageAppImage', Exec) {
     dependsOn 'prepareMacResources'
+    dependsOn 'stageMacPackageInput'
     dependsOn 'verifyPackagingPlatform'
     dependsOn 'checkPackagingPlatforms'
     dependsOn 'updateDesktopIcons'
@@ -318,7 +330,8 @@ tasks.register('packageAppImage', Exec) {
     }
     executable jpackageExecutable
     args '--type', 'app-image', '--name', 'ProtoLens',
-            '--input', layout.buildDirectory.dir('distribution-input').get().asFile.absolutePath,
+            '--input', layout.buildDirectory.dir(analyzerPlatform.os == 'macos'
+                    ? 'macos-package-input' : 'distribution-input').get().asFile.absolutePath,
             '--dest', analyzerStagingRoot.absolutePath,
             '--main-jar', 'protolens.jar', '--app-version', nativeAppVersion,
             '--icon', file("${layout.buildDirectory.get().asFile}/generated-resources/desktop/${analyzerPlatform.icon}").absolutePath,
@@ -330,6 +343,16 @@ tasks.register('packageAppImage', Exec) {
     }
     doLast {
         def staged = new File(analyzerStagingRoot, analyzerPlatform.imageName)
+        if (analyzerPlatform.os == 'macos') {
+            project.exec {
+                commandLine 'ditto', layout.buildDirectory.dir('distribution-input/runtime-tools/mitmproxy.app').get().asFile.absolutePath,
+                        new File(staged, 'Contents/app/runtime-tools/mitmproxy.app').absolutePath
+            }
+            // 只重新封装本产品，不 deep 重签采集器，避免破坏其脚本入口和原生依赖的签名。
+            // 这是本机 ad-hoc 签名，并非 Apple Developer ID 签名或公证。
+            project.exec { commandLine 'codesign', '--force', '--sign', '-', staged.absolutePath }
+            project.exec { commandLine 'codesign', '--verify', staged.absolutePath }
+        }
         if (!new File(staged, analyzerPlatform.launcher).isFile()) {
             throw new GradleException('新镜像缺少平台启动程序，保留原镜像')
         }
