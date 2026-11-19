@@ -56,7 +56,7 @@ public final class SystemProxyManager implements AutoCloseable {
             return status();
         }
         if (backend.requiresAuthorization()) {
-            message = "点击接管系统代理后，按 macOS 提示授权；恢复时也可能需要授权";
+            message = "首次接管按 macOS 提示授权；本次运行复用网络授权，系统撤销或授权失效时需重新授权";
             return status();
         }
         recoverAbandoned();
@@ -349,7 +349,11 @@ public final class SystemProxyManager implements AutoCloseable {
                 restore();
             }
         } finally {
-            releaseLock();
+            try {
+                releaseLock();
+            } finally {
+                backend.close();
+            }
         }
     }
 }
