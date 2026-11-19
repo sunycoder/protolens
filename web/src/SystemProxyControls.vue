@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from "vue";
+import { onMounted, onUnmounted, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api, post } from "./types";
 interface ProxyStatus {
@@ -13,6 +13,8 @@ interface ProxyStatus {
   current: string;
   target: string;
   message: string;
+  requiresAuthorization?: boolean;
+  networkNotice?: string;
 }
 const state = ref<ProxyStatus>();
 defineProps<{ compact?: boolean }>();
@@ -27,6 +29,8 @@ defineExpose({ refresh });
 const busy = ref(false);
 const error = ref("");
 let prompted = false;
+let networkTimer: ReturnType<typeof setInterval> | undefined;
+onUnmounted(() => clearInterval(networkTimer));
 async function connect(initial?: ProxyStatus) {
   busy.value = true;
   error.value = "";
@@ -81,6 +85,15 @@ async function restore() {
 onMounted(async () => {
   try {
     state.value = await api<ProxyStatus>("/api/system-proxy");
+    if (state.value.requiresAuthorization) {
+      networkTimer = setInterval(() => {
+        if (!busy.value && state.value?.canRestore) {
+          void refresh().catch((failure) => {
+            error.value = String(failure);
+          });
+        }
+      }, 30000);
+    }
     if (state.value.autoPrompt && !prompted) {
       prompted = true;
       await connect(state.value);
@@ -106,6 +119,11 @@ onMounted(async () => {
         v-if="!state.managed"
         size="small"
         :loading="busy"
+        :title="
+          state.requiresAuthorization
+            ? 'macOS 将请求系统授权，恢复时也可能需要授权'
+            : ''
+        "
         @click="connect()"
         >接管系统代理</el-button
       >
@@ -117,6 +135,9 @@ onMounted(async () => {
         >恢复原代理</el-button
       >
     </template>
+    <span v-if="state?.networkNotice" class="muted">{{
+      state.networkNotice
+    }}</span>
     <span v-if="error" class="muted" :title="error">系统代理操作未完成</span>
   </span>
 </template>

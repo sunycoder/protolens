@@ -55,6 +55,10 @@ public final class SystemProxyManager implements AutoCloseable {
         if (!backend.supported() || !automatic) {
             return status();
         }
+        if (backend.requiresAuthorization()) {
+            message = "点击接管系统代理后，按 macOS 提示授权；恢复时也可能需要授权";
+            return status();
+        }
         recoverAbandoned();
         if (!collectorReady.getAsBoolean()) {
             message = "采集器未就绪，未修改系统代理";
@@ -74,11 +78,23 @@ public final class SystemProxyManager implements AutoCloseable {
                         .put("automatic", automatic)
                         .put("target", "127.0.0.1:" + port)
                         .put("message", message)
-                        .put("vpnNotice", "仅管理 Windows 系统代理，无法可靠识别或控制 VPN 的 TUN 模式");
+                        .put("requiresAuthorization", backend.requiresAuthorization())
+                        .put("vpnNotice", "仅管理系统 HTTP/HTTPS 代理，无法可靠识别或控制 VPN 的 TUN 模式");
         if (!backend.supported()) {
-            return result.put("message", "自动接管目前支持 Windows，其他系统请手动配置代理");
+            return result.put("message", "自动接管支持 Windows 和 macOS，其他系统请手动配置代理");
         }
-        ProxySettings current = backend.read();
+        ProxySettings statusSnapshot = applied;
+        if (statusSnapshot == null
+                && backend.requiresAuthorization()
+                && Files.isRegularFile(stateFile())) {
+            // 状态查询只读恢复文件，不取得租约、不弹授权；离线或切网后仍显示原服务的恢复入口。
+            statusSnapshot =
+                    mapper.treeToValue(
+                            mapper.readTree(stateFile().toFile()).get("applied"),
+                            ProxySettings.class);
+        }
+        ProxySettings current = backend.readFor(statusSnapshot);
+        result.put("networkNotice", backend.notice(statusSnapshot));
         boolean managed = lease != null && applied != null && applied.equals(current);
         return result.put("managed", managed)
                 .put("current", current.description())
@@ -99,11 +115,14 @@ public final class SystemProxyManager implements AutoCloseable {
         if (!collectorReady.getAsBoolean()) {
             throw new IllegalArgumentException("请等待采集器就绪后再接管，避免游戏断网");
         }
-        ProxySettings current = backend.read();
+        ProxySettings current = backend.readFor(applied);
         if (applied != null && lease != null && current.equals(applied)) {
             return status();
         }
         if (applied != null) {
+            if (applied.mac() != null) {
+                throw new IOException("原网络的代理租约尚未恢复，请先恢复原代理再接管");
+            }
             forgetLease();
         }
         if (current.hasProxyConfiguration()
@@ -111,6 +130,9 @@ public final class SystemProxyManager implements AutoCloseable {
             message = "检测到已有代理配置，请确认是否临时切换到采集代理";
             return status();
         }
+        // 先验证平台能力（例如认证代理不可安全备份），拒绝时不持锁、不创建恢复文件。
+        ProxySettings nextOriginal = backend.recoveryOriginal(port, current);
+        ProxySettings nextApplied = backend.local(port, current);
         if (!acquire()) {
             throw new IOException("另一工作台正在管理系统代理，请先在该工作台恢复代理");
         }
@@ -127,19 +149,12 @@ public final class SystemProxyManager implements AutoCloseable {
         }
         // 已有手动代理正指向本工具时，页面单独说明并确认：退出关闭该遗留手动代理。
         // 不伪造未知的更早 VPN 配置，也不把将要关闭的采集端口恢复为活动代理。
-        original =
-                current.pointsTo(port)
-                        ? new ProxySettings(
-                                (current.flags() & ~ProxySettings.MANUAL) | ProxySettings.DIRECT,
-                                current.server(),
-                                current.bypass(),
-                                current.autoConfigUrl())
-                        : current;
-        applied = ProxySettings.local(port, current);
+        original = nextOriginal;
+        applied = nextApplied;
         try {
             saveLease();
             backend.compareAndWrite(current, applied);
-            if (!backend.read().equals(applied)) {
+            if (!backend.readFor(applied).equals(applied)) {
                 throw new IOException("系统代理写入后校验不一致");
             }
             autoPrompt = false;
@@ -178,13 +193,17 @@ public final class SystemProxyManager implements AutoCloseable {
             }
             readLease();
         }
-        ProxySettings current = backend.read();
+        ProxySettings current = backend.readFor(applied);
         if (current.equals(applied)) {
             backend.compareAndWrite(current, original);
-            if (!backend.read().equals(original)) {
+            if (!backend.readFor(original).equals(original)) {
                 throw new IOException("恢复系统代理后的校验失败，已保留恢复备份");
             }
             message = "已恢复接管前的系统代理配置";
+        } else if (applied.mac() != null && !current.equals(original)) {
+            // macOS 多项 networksetup 调用可能只完成一部分。不能将部分失败当成外部接管后丢弃备份。
+            // 也不盲目覆盖第三方新值；保留证据，由用户核对并恢复后再次清理租约。
+            throw new IOException("网络代理已变化或仅部分写入，未覆盖当前配置，已保留恢复备份；请核对系统网络设置后重试");
         } else {
             message = "系统代理已被其他程序修改，已保留其当前配置";
         }
@@ -255,6 +274,13 @@ public final class SystemProxyManager implements AutoCloseable {
                                         .setPrincipal(Files.getOwner(temporary))
                                         .setPermissions(EnumSet.allOf(AclEntryPermission.class))
                                         .build()));
+            }
+            var posix =
+                    Files.getFileAttributeView(
+                            temporary, java.nio.file.attribute.PosixFileAttributeView.class);
+            if (posix != null) {
+                posix.setPermissions(
+                        java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
             }
             try {
                 Files.move(temporary, stateFile(), StandardCopyOption.ATOMIC_MOVE);

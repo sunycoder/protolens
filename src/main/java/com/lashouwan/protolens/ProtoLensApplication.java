@@ -8,6 +8,7 @@ import com.lashouwan.protolens.config.AnalyzerSettingsStore;
 import com.lashouwan.protolens.constant.AnalyzerLimits;
 import com.lashouwan.protolens.desktop.CollectorProcess;
 import com.lashouwan.protolens.desktop.RuntimePlatform;
+import com.lashouwan.protolens.desktop.proxy.MacSystemProxyBackend;
 import com.lashouwan.protolens.desktop.proxy.SystemProxyManager;
 import com.lashouwan.protolens.desktop.proxy.WindowsSystemProxyBackend;
 import com.lashouwan.protolens.http.AnalyzerHttpSupport;
@@ -68,8 +69,11 @@ public final class ProtoLensApplication {
         }
         this.systemProxy =
                 new SystemProxyManager(
-                        new WindowsSystemProxyBackend(
-                                options.moduleRoot().resolve("tools/WindowsSystemProxy.ps1")),
+                        RuntimePlatform.current().os().equals("macos")
+                                ? new MacSystemProxyBackend()
+                                : new WindowsSystemProxyBackend(
+                                        options.moduleRoot()
+                                                .resolve("tools/WindowsSystemProxy.ps1")),
                         proxyDirectory,
                         options.config().collectorPort(),
                         () -> "RUNNING".equals(collector.status(mapper).path("state").asText()));

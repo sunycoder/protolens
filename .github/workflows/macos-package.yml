@@ -50,6 +50,8 @@ jobs:
           node-version: "22.12"
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - name: 验证代理事务与原生授权脚本语法（不修改网络）
+        run: gradle test --tests 'com.lashouwan.protolens.desktop.proxy.*' -x webBuild -x webInstall
       - name: 构建真实 DMG 与原生便携包
         run: gradle packageInstaller packagePortable
       - name: 验收双击启动与内置采集器
