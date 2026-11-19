@@ -275,6 +275,7 @@ tasks.register('packageAppImage', Exec) {
             '--dest', analyzerStagingRoot.absolutePath,
             '--main-jar', 'protolens.jar', '--app-version', analyzerVersion,
             '--icon', file("${layout.buildDirectory.get().asFile}/generated-resources/desktop/${analyzerPlatform.icon}").absolutePath,
+            '--java-options', '-Dfile.encoding=UTF-8',
             '--vendor', 'Stupidbird', '--add-modules', 'java.se,jdk.unsupported,jdk.crypto.ec,jdk.zipfs'
     if (analyzerPlatform.os == 'macos') {
         args '--mac-package-identifier', 'com.lashouwan.protolens'

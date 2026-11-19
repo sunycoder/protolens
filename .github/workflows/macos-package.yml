@@ -1,0 +1,66 @@
+name: macOS DMG 安装验收
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/*"
+      - "gradle/**"
+      - "build.gradle"
+      - "src/**"
+      - "tools/**"
+      - "config/**"
+      - "web/**"
+  push:
+    branches: [main, master]
+    paths:
+      - ".github/workflows/*"
+      - "gradle/**"
+      - "build.gradle"
+      - "src/**"
+      - "tools/**"
+      - "config/**"
+      - "web/**"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: macos-arm64
+          - os: macos-15-intel
+            platform: macos-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.5"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.12"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: 构建真实 DMG 与原生便携包
+        run: gradle packageInstaller packagePortable
+      - name: 验收双击启动与内置采集器
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version=//p' src/main/resources/analyzer-version.properties | tr -d '\r')
+          node tools/verify-macos-package.mjs "build/installer/ProtoLens-${version}-${{ matrix.platform }}.dmg" "${{ matrix.platform }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-${{ matrix.platform }}
+          if-no-files-found: error
+          path: |
+            build/installer/ProtoLens-*.dmg
+            build/distributions/ProtoLens-*.tar.gz
