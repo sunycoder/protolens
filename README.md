@@ -18,12 +18,12 @@
 
 | 系统 | 安装包 | 便携版 |
 | --- | --- | --- |
-| Windows x64 | [下载 ProtoLens-latest.exe](https://github.com/sunycoder/protolens/releases/download/v0.1.5/ProtoLens-latest.exe) | [下载 Windows ZIP](https://github.com/sunycoder/protolens/releases/download/v0.1.5/ProtoLens-0.1.5-windows-x64.zip) |
-| macOS Apple Silicon | 新增 `macos-arm64.dmg` 构建，发布后从 Releases 下载 | 同架构 `.app` 的 tar.gz |
-| macOS Intel | 新增 `macos-x64.dmg` 构建，发布后从 Releases 下载 | 同架构 `.app` 的 tar.gz |
-| Linux x64 | [下载 Linux tar.gz](https://github.com/sunycoder/protolens/releases/download/v0.1.5/ProtoLens-0.1.5-linux-x64.tar.gz) | 同一文件 |
+| Windows x64 | [下载 ProtoLens-latest.exe](https://github.com/sunycoder/protolens/releases/download/v0.1.6/ProtoLens-latest.exe) | [下载 Windows ZIP](https://github.com/sunycoder/protolens/releases/download/v0.1.6/ProtoLens-0.1.6-windows-x64.zip) |
+| macOS Apple Silicon | [下载 Apple Silicon DMG](https://github.com/sunycoder/protolens/releases/download/v0.1.6/ProtoLens-0.1.6-macos-arm64.dmg) | [下载 Apple Silicon 便携包](https://github.com/sunycoder/protolens/releases/download/v0.1.6/ProtoLens-0.1.6-macos-arm64.tar.gz) |
+| macOS Intel | [下载 Intel DMG](https://github.com/sunycoder/protolens/releases/download/v0.1.6/ProtoLens-0.1.6-macos-x64.dmg) | [下载 Intel 便携包](https://github.com/sunycoder/protolens/releases/download/v0.1.6/ProtoLens-0.1.6-macos-x64.tar.gz) |
+| Linux x64 | [下载 Linux tar.gz](https://github.com/sunycoder/protolens/releases/download/v0.1.6/ProtoLens-0.1.6-linux-x64.tar.gz) | 同一文件 |
 
-当前发布版本：`v0.1.5`。上表 macOS DMG 为本次新增流程的产物，尚未发布；旧版 macOS tar.gz 仍是需要 Java 21 的命令行启动包，不要与新的原生应用包混用。
+当前发布版本：`v0.1.6`。macOS DMG 和对应架构的便携包均内置运行环境；旧版 `v0.1.5` 的 macOS tar.gz 是需要 Java 21 的命令行启动包，不要与新的原生应用包混用。
 
 **Windows 安装版**：运行下载的 `ProtoLens-latest.exe`，安装后打开快捷方式；便携版解压整个 ZIP 后运行 `ProtoLens/ProtoLens.exe`，无需另装 Java、Node 或采集器。
 
@@ -187,7 +187,7 @@ macOS / Linux 使用 `sh` 运行脚本，不依赖下载或拷贝后是否保留
   "-PanalyzerWixDir=C:/Program Files (x86)/WiX Toolset v3.14/bin" `
   "-PanalyzerNodeExecutable=D:/dev/Node/node.exe" `
   "-PanalyzerMitmdumpExecutable=D:/tools/mitmproxy/mitmdump.exe" `
-  -PanalyzerVersion=0.1.5
+  -PanalyzerVersion=0.1.6
 ```
 
 macOS / Linux 使用同名 Gradle 属性和本机程序路径，使用 POSIX 换行符，例如：
