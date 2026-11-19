@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lashouwan.protolens.config.AnalyzerLaunchOptions;
+import com.lashouwan.protolens.desktop.RuntimePlatform;
 
 import io.vertx.core.Vertx;
 
@@ -71,6 +72,42 @@ class ProtocolStartupTest {
             assertEquals(port, settings.path("serverPort").asInt());
             assertEquals(origin, settings.path("browserAddress").asText());
             assertFalse(settings.path("catalogError").asText().isEmpty());
+            var collectorResponse =
+                    client.send(
+                            HttpRequest.newBuilder(URI.create(origin + "/api/collector"))
+                                    .GET()
+                                    .build(),
+                            HttpResponse.BodyHandlers.ofString());
+            var collectorInfo = mapper.readTree(collectorResponse.body());
+            assertEquals(RuntimePlatform.current().os(), collectorInfo.path("platform").asText());
+            assertEquals(options.config().collectorPort(), collectorInfo.path("proxyPort").asInt());
+            assertFalse(collectorInfo.path("certificateAvailable").asBoolean());
+            Path certificateDirectory = options.dataDirectory().resolve("mitmproxy-conf");
+            Files.createDirectories(certificateDirectory);
+            Files.writeString(
+                    certificateDirectory.resolve("mitmproxy-ca-cert.cer"),
+                    "PUBLIC TEST CERTIFICATE");
+            Files.writeString(
+                    certificateDirectory.resolve("mitmproxy-ca.pem"), "PRIVATE TEST MARKER");
+            // 下载入口忽略任意 path 参数，只能取得固定的公开文件。
+            var certificate =
+                    client.send(
+                            HttpRequest.newBuilder(
+                                            URI.create(
+                                                    origin
+                                                            + "/api/collector/certificate?path=mitmproxy-ca.pem"))
+                                    .GET()
+                                    .build(),
+                            HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, certificate.statusCode());
+            assertEquals("PUBLIC TEST CERTIFICATE", certificate.body());
+            assertTrue(
+                    certificate
+                            .headers()
+                            .firstValue("Content-Disposition")
+                            .orElse("")
+                            .contains("protolens-ca.crt"));
+            assertEquals("no-store", certificate.headers().firstValue("Cache-Control").orElse(""));
             assertEquals(
                     200,
                     client.send(

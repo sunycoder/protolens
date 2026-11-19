@@ -13,12 +13,15 @@ import com.lashouwan.protolens.desktop.RuntimePlatform;
 import com.lashouwan.protolens.protocol.ProtocolCatalog;
 import com.lashouwan.protolens.protocol.ProtocolCatalogService;
 
+import io.vertx.core.buffer.Buffer;
 import io.vertx.ext.web.Router;
 
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 
 /** 服务健康、实际启动地址及页面偏好接口；配置源和生效值一起展示，端口不由页面偏好覆盖。 */
@@ -80,11 +83,50 @@ public final class SystemController {
                                                 collector
                                                         .status(mapper)
                                                         .put(
+                                                                "platform",
+                                                                RuntimePlatform.current().os())
+                                                        .put("proxyHost", "127.0.0.1")
+                                                        .put(
+                                                                "proxyPort",
+                                                                options.config().collectorPort())
+                                                        .put(
+                                                                "certificateAvailable",
+                                                                Files.isRegularFile(
+                                                                        certificateFile()))
+                                                        .put(
                                                                 "certificateFile",
-                                                                options.dataDirectory()
-                                                                        .resolve(
-                                                                                "mitmproxy-conf/mitmproxy-ca-cert.cer")
-                                                                        .toString())));
+                                                                certificateFile().toString())));
+        router.get("/api/collector/certificate")
+                .handler(
+                        context ->
+                                context.vertx()
+                                        .executeBlocking(
+                                                () -> {
+                                                    // 仅开放采集器生成的公开 CA，不接收用户路径，也不暴露同目录的私钥文件。
+                                                    Path certificate = certificateFile();
+                                                    if (!Files.isRegularFile(certificate)
+                                                            || Files.size(certificate)
+                                                                    > 64 * 1024) {
+                                                        throw new IllegalArgumentException(
+                                                                "公开证书尚未生成，请确认采集器已运行后刷新");
+                                                    }
+                                                    return Files.readAllBytes(certificate);
+                                                },
+                                                false)
+                                        .onSuccess(
+                                                bytes ->
+                                                        context.response()
+                                                                .putHeader(
+                                                                        "Content-Type",
+                                                                        "application/x-x509-ca-cert")
+                                                                .putHeader(
+                                                                        "Content-Disposition",
+                                                                        "attachment;"
+                                                                            + " filename=protolens-ca.crt")
+                                                                .putHeader(
+                                                                        "Cache-Control", "no-store")
+                                                                .end(Buffer.buffer(bytes)))
+                                        .onFailure(failure -> http.fail(context, failure)));
         router.get("/api/collector/settings")
                 .handler(context -> http.worker(context, collectorConfig::snapshot));
         router.post("/api/collector/settings")
@@ -101,6 +143,11 @@ public final class SystemController {
                                             live.configure(settings, http.body(context));
                                             return settingsSnapshot();
                                         }));
+    }
+
+    /** 公开 CA 的固定位置；不提供任意本机文件下载能力。 */
+    private Path certificateFile() {
+        return options.dataDirectory().resolve("mitmproxy-conf/mitmproxy-ca-cert.cer");
     }
 
     /** 读取公开 GitHub Release 元数据，按当前系统筛选安装包。 */

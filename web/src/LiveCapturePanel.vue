@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { api, post } from "./types";
 import { ElMessage, ElMessageBox } from "element-plus";
 import SystemProxyControls from "./SystemProxyControls.vue";
+import CaptureConnectionGuide from "./CaptureConnectionGuide.vue";
 import { changedCaptures, type CaptureProgress } from "./workspaceRefresh";
 
 interface LiveConnection {
@@ -418,56 +419,12 @@ onBeforeUnmount(() => {
         }}</el-button></template
       >
     </el-dialog>
-    <el-dialog v-model="instructions" title="实时采集使用步骤" width="660px">
-      <ol class="guide">
-        <li>
-          启动工作台后，在“连接与诊断”确认采集器已就绪，再点击“开始采集”。无需单独启动采集脚本。
-        </li>
-        <li>
-          首次使用安装
-          {{
-            collector.certificateFile ||
-            "数据目录中的 mitmproxy-conf/mitmproxy-ca-cert.cer"
-          }}
-          这份公开 CA 证书：Windows
-          导入当前用户的“受信任的根证书颁发机构”；macOS
-          导入“钥匙串访问”，双击证书，在“信任”中设置信任；Linux
-          使用发行版或客户端的证书管理工具导入。客户端使用独立证书库时，还需在客户端导入。不要分享同目录内的
-          CA 私钥文件。
-        </li>
-        <li>
-          <template v-if="proxy?.supported"
-            >Windows 可用“接管系统代理 /
-            恢复原代理”切换；已有代理时先确认，或选择“保留原代理”。</template
-          >
-          <template v-else
-            >当前系统需手动配置代理。macOS：系统设置 → 网络 → 当前网络 →
-            详细信息 →
-            代理，配置网页代理（HTTP）和安全网页代理（HTTPS）；Linux：在桌面网络设置或游戏客户端中配置
-            HTTP / HTTPS 代理。</template
-          >
-          代理地址为 127.0.0.1，端口为
-          {{
-            collector.port
-          }}。完成后完全关闭并重新打开小游戏，确认收到的帧数开始增加。
-        </li>
-        <li>
-          在上方选择游戏连接，搜索 CgAllianceTechDonate
-          或其他协议。消息约每秒刷新，点击查看字段、JSON 与原始业务包。
-        </li>
-        <li>
-          取消跟随只暂停页面；消息继续进入有界缓存。停止时自行选择是否保存。
-          Windows 已由工作台接管的代理会在退出时恢复；macOS / Linux
-          手动配置的代理需自行恢复，避免工作台退出后仍指向已关闭的端口。
-        </li>
-      </ol>
-      <p class="muted">
-        独立采集器使用 mitmproxy；Fiddler 的 SAZ
-        离线导入仍保留。采集器提供已经解压、重组的完整业务消息，因此实时记录有业务包
-        HEX，不声称保留原始 WebSocket wire
-        帧。后端或采集器重启后需重新开始并重进小游戏。
-      </p>
-    </el-dialog>
+    <CaptureConnectionGuide
+      v-model="instructions"
+      :live="state"
+      :proxy="proxy"
+      @refresh="refreshDiagnostics"
+    />
   </section>
 </template>
 <style scoped>
