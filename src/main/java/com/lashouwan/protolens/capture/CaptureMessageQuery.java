@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.lashouwan.protolens.enums.MessageFilterCondition;
 import com.lashouwan.protolens.enums.MessageOrder;
 
 import java.util.AbstractMap;
@@ -11,6 +12,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Deque;
+import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
@@ -31,28 +33,54 @@ public final class CaptureMessageQuery {
     private static final int PREVIEW_VALUE_LENGTH = 60;
     private static final int SEARCH_PREVIEW_CONTEXT_BEFORE = 20;
     private static final int SEARCH_PREVIEW_VALUE_LENGTH = 80;
-    private static final String PROTOCOL_ID_PREFIX = "id:";
-    private static final String PROTOCOL_NAME_PREFIX = "name:";
+    private static final int MAX_DIAGNOSTIC_MESSAGES = 5000;
+    private static final long DIAGNOSTIC_NANOS = 50_000_000L;
+    private static final int MAX_DIAGNOSTIC_BODY_BYTES = 128 * 1024;
+    private static final int MAX_DIAGNOSTIC_REASONS = 3;
     private final ObjectMapper mapper;
 
     public CaptureMessageQuery(ObjectMapper mapper) {
         this.mapper = mapper;
     }
 
+    /**
+     * 通知只统计指定原消息区间中当前筛选实际可见的消息，与列表共用同一匹配规则。 锁外读取稳定视图，不复制消息体、不生成列表摘要，也不把已淘汰的消息计为可查看。
+     * 返回的首次编号仅为区间内首次；是否属于本记录首次由调用方与累计统计核对。
+     */
+    public ObjectNode activityWindow(ObjectNode capture, MessageQuery request) {
+        var tracker = new CaptureActivityTracker();
+        JsonNode messages = capture.path("messages");
+        int lower = lowerBound(messages, request.from());
+        int upper =
+                lowerBound(
+                        messages,
+                        request.to() == Integer.MAX_VALUE ? request.to() : request.to() + 1);
+        for (int index = lower; index < upper; index++) {
+            JsonNode message = messages.path(index);
+            if (CaptureMessageMatcher.metadataFailures(message, request) == 0
+                    && CaptureMessageMatcher.keywordMatches(message, request.query())) {
+                tracker.append(message, mapper);
+            }
+        }
+        ObjectNode result =
+                tracker.snapshot(
+                        mapper,
+                        capture.path("clearVersion").asLong(),
+                        capture.path("firstIndex").asInt());
+        return result.put("mode", "retained")
+                .put(
+                        "complete",
+                        result.path("complete").asBoolean()
+                                && request.from() >= capture.path("firstIndex").asInt());
+    }
+
     public ObjectNode messages(ObjectNode capture, MessageQuery request, ObjectNode summary) {
         String query = request.query();
-        String direction = request.direction();
-        String status = request.status();
-        String connection = request.connection();
-        boolean hideHeartbeat = request.hideHeartbeat();
         int from = request.from();
         int to = request.to();
         int offset = request.offset();
         int limit = request.limit();
         MessageOrder order = request.order();
-        String include = request.include();
-        String exclude = request.exclude();
-        String protocolId = request.protocolId();
         String messageIndex = request.messageIndex();
 
         List<JsonNode> matching = new ArrayList<>();
@@ -67,37 +95,9 @@ public final class CaptureMessageQuery {
         }
         for (int candidate = lower; candidate < upper; candidate++) {
             JsonNode node = messages.path(candidate);
-            int index = node.path("index").asInt();
-            if (!messageIndex.isBlank() && !messageIndex.equals(Integer.toString(index))) {
+            if (CaptureMessageMatcher.metadataFailures(node, request) != 0
+                    || !CaptureMessageMatcher.keywordMatches(node, query)) {
                 continue;
-            }
-            if (index < from
-                    || index > to
-                    || (!direction.isBlank() && !direction.equals(node.path("direction").asText()))
-                    || (!status.isBlank() && !status.equals(node.path("status").asText()))
-                    || (!connection.isBlank()
-                            && !connection.equals(node.path("connection").asText()))) {
-                continue;
-            }
-            String protocol =
-                    node.path("protocolName").asText() + " " + node.path("protocolId").asText();
-            if (!protocolId.isBlank() && !protocolId.equals(node.path("protocolId").asText())) {
-                continue;
-            }
-            if (hideHeartbeat && protocol.contains("SynchronizeTime")) {
-                continue;
-            }
-            if (!include.isBlank() && !matchesProtocol(node, protocol, include)) {
-                continue;
-            }
-            if (!exclude.isBlank() && matchesProtocol(node, protocol, exclude)) {
-                continue;
-            }
-            if (!keyword.isBlank()) {
-                String searchable = protocol + " " + node.path("body");
-                if (!searchable.toLowerCase(Locale.ROOT).contains(keyword)) {
-                    continue;
-                }
             }
             matching.add(node);
         }
@@ -133,7 +133,7 @@ public final class CaptureMessageQuery {
                 String text = value.isContainerNode() ? "[" + value.size() + "项]" : value.asText();
                 preview.append(field.getKey())
                         .append('=')
-                        .append(text.substring(0, Math.min(PREVIEW_VALUE_LENGTH, text.length())));
+                        .append(text, 0, Math.min(PREVIEW_VALUE_LENGTH, text.length()));
             }
             // 搜索时优先展示实际命中的嵌套字段；协议名匹配但消息体未命中时保留普通摘要。
             String matchedPreview =
@@ -148,6 +148,9 @@ public final class CaptureMessageQuery {
                         .put("limit", limit);
         result.set("items", items);
         result.set("capture", summary);
+        if (matching.isEmpty()) {
+            diagnose(messages, request, result);
+        }
         return result;
     }
 
@@ -217,30 +220,54 @@ public final class CaptureMessageQuery {
         return String.join(" · ", matches);
     }
 
-    /** 快捷操作使用 id:/name: 精确标识；手工输入的普通词仍保留模糊包含语义。 */
-    private boolean matchesProtocol(JsonNode message, String protocol, String patterns) {
-        String value = protocol.toLowerCase(Locale.ROOT);
-        for (String pattern : patterns.split("[,，\\s]+")) {
-            if (pattern.startsWith(PROTOCOL_ID_PREFIX)) {
-                if (message.hasNonNull("protocolId")
-                        && pattern.substring(PROTOCOL_ID_PREFIX.length())
-                                .equals(message.path("protocolId").asText())) {
-                    return true;
-                }
+    /**
+     * 只在无结果时寻找单项阻碍的证据，不猜测“协议不存在”或静默清空全部筛选。 最多扫描 5000 条和 50ms；带正文查询时跳过未知大小或超过 128KiB 的包，并明确诊断不完整。
+     */
+    private void diagnose(JsonNode messages, MessageQuery query, ObjectNode result) {
+        var reasons = result.putArray("emptyReasons");
+        Set<MessageFilterCondition> found = EnumSet.noneOf(MessageFilterCondition.class);
+        long deadline = System.nanoTime() + DIAGNOSTIC_NANOS;
+        boolean truncated = false;
+        int scanned = 0;
+        for (JsonNode node : messages) {
+            if (scanned++ >= MAX_DIAGNOSTIC_MESSAGES || System.nanoTime() > deadline) {
+                truncated = true;
+                break;
+            }
+            int failures = CaptureMessageMatcher.metadataFailures(node, query);
+            if (Integer.bitCount(failures) != 1) {
                 continue;
             }
-            if (pattern.startsWith(PROTOCOL_NAME_PREFIX)) {
-                if (pattern.substring(PROTOCOL_NAME_PREFIX.length())
-                        .equals(message.path("protocolName").asText())) {
-                    return true;
-                }
+            if (!query.query().isBlank()
+                    && (!node.has("bytes")
+                            || node.path("bytes").asLong() > MAX_DIAGNOSTIC_BODY_BYTES)) {
+                truncated = true;
                 continue;
             }
-            if (!pattern.isBlank() && value.contains(pattern.toLowerCase(Locale.ROOT))) {
-                return true;
+            if (!CaptureMessageMatcher.keywordMatches(node, query.query())) {
+                continue;
+            }
+            for (var condition : MessageFilterCondition.values()) {
+                if (condition.mask() != failures || !found.add(condition)) {
+                    continue;
+                }
+                reasons.addObject()
+                        .put("field", condition.field())
+                        .put("description", condition.description())
+                        .put("action", condition.action())
+                        .put("witnessIndex", node.path("index").asInt())
+                        .put(
+                                "value",
+                                condition == MessageFilterCondition.EXCLUDE
+                                        ? CaptureMessageMatcher.excludedTokens(
+                                                node, query.exclude())
+                                        : "");
+            }
+            if (reasons.size() >= MAX_DIAGNOSTIC_REASONS) {
+                break;
             }
         }
-        return false;
+        result.put("diagnosticTruncated", truncated);
     }
 
     private int lowerBound(JsonNode messages, int index) {

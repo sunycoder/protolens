@@ -1,4 +1,5 @@
 import type { IdentityState } from "./domain";
+import type { CaptureActivity, EmptyReason } from "./liveReading";
 export interface Connection {
   note?: string;
   identity?: ConnectionIdentity;
@@ -80,6 +81,9 @@ export interface Packet {
   catalog?: { sourceFile: string; sha256: string };
 }
 export interface Page {
+  activity?: CaptureActivity;
+  emptyReasons?: EmptyReason[];
+  diagnosticTruncated?: boolean;
   queryMs?: number;
   lockWaitMs?: number;
   snapshotMs?: number;

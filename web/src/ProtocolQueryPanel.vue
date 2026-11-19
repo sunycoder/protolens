@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useInlineCopy } from "./useInlineCopy";
 import { ref, shallowRef, computed, watch, onBeforeUnmount } from "vue";
 import { ElMessage } from "element-plus";
 import { api, type Capture } from "./types";
@@ -21,6 +22,7 @@ const props = defineProps<{
   capture?: Capture;
   target?: ProtocolQueryTarget;
   catalogVersion?: string;
+  returnLabel?: string;
 }>();
 const emit = defineEmits<{
   messages: [value: { captureId: string; protocolId: number }];
@@ -39,7 +41,7 @@ const detailBusy = ref(false);
 const error = ref("");
 const detailError = ref("");
 const matchPath = ref("");
-const stack = ref<{ key: string; path: string }[]>([]);
+const stack = ref<{ key: string; path: string; label: string }[]>([]);
 const searchGate = new RequestGate();
 const detailGate = new RequestGate();
 const sourceGate = new RequestGate();
@@ -140,7 +142,11 @@ async function open(key: string, path = "", push = true, offset = 0) {
     );
     if (!request.current()) return;
     if (push && before && before.key !== key)
-      stack.value.push({ key: before.key, path: matchPath.value });
+      stack.value.push({
+        key: before.key,
+        path: matchPath.value,
+        label: `${before.kind === "message" ? "协议" : "结构体"} ${before.name}`,
+      });
     selected.value = response;
     matchPath.value = path;
     fieldPage.value =
@@ -172,13 +178,9 @@ function changeFieldPage(value: number) {
       (value - 1) * selected.value.fieldPageSize,
     );
 }
+const inlineCopy = useInlineCopy();
 async function copy(text: string) {
-  try {
-    await navigator.clipboard.writeText(text);
-    ElMessage.success("已复制");
-  } catch {
-    ElMessage.error("复制失败，请选择文本复制");
-  }
+  await inlineCopy.copy(text);
 }
 async function showSource() {
   if (!selected.value) return;
@@ -254,7 +256,9 @@ watch(
     <div class="query-heading">
       <strong>协议查询</strong
       ><span class="muted">查字典定义、字段与结构引用；无需抓包</span
-      ><el-button @click="emit('close')">返回抓包</el-button>
+      ><el-button @click="emit('close')">{{
+        returnLabel || "返回抓包"
+      }}</el-button>
     </div>
     <form class="protocol-query-tools" @submit.prevent="search()">
       <label
@@ -381,7 +385,7 @@ watch(
         <template v-if="selected">
           <div class="definition-heading">
             <el-button v-if="stack.length" text @click="back"
-              >返回上级</el-button
+              >返回{{ stack.at(-1)?.label || "上级" }}</el-button
             >
             <h3>{{ selected.name }}</h3>
             <el-tag size="small">{{
@@ -391,6 +395,12 @@ watch(
             }}</el-tag>
           </div>
           <div class="definition-actions">
+            <span
+              v-if="inlineCopy.feedback.value"
+              class="muted"
+              role="status"
+              >{{ inlineCopy.feedback.value }}</span
+            >
             <el-button size="small" @click="copy(selected.name)"
               >复制名称</el-button
             ><el-button

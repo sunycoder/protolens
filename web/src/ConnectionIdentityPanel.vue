@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import CopyText from "./CopyText.vue";
 import { MAX_CONNECTION_NOTE_LENGTH, MAX_IDENTITY_HISTORY } from "./constants";
 import { IdentityState } from "./domain";
 import { ref, watch } from "vue";
@@ -126,9 +127,14 @@ onBeforeUnmount(() => gate.cancel());
       <p class="muted identity-endpoint">连接 ID：{{ connection.id }}</p>
       <p class="muted identity-endpoint">{{ connection.endpoint }}</p>
       <p v-if="connection.identity?.state === IdentityState.IDENTIFIED">
-        账号 ID：{{ connection.identity.accountId || "未提供" }} · 角色 ID：{{
-          connection.identity.roleId
-        }}
+        账号 ID：<CopyText
+          v-if="connection.identity.accountId"
+          :value="connection.identity.accountId"
+          label="账号 ID"
+        /><span v-else>未提供</span> · 角色 ID：<CopyText
+          :value="connection.identity.roleId || '未提供'"
+          label="角色 ID"
+        />
         · 区服：{{ connection.identity.serverId || "未提供" }}
       </p>
       <p v-else class="muted">

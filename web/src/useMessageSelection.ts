@@ -3,13 +3,14 @@ import {
   DETAIL_PREFETCH_MAX_BYTES,
 } from "./constants.ts";
 import { ref, shallowRef } from "vue";
-import { RequestGate } from "./workspaceRefresh";
-import { api, type Capture, type Packet } from "./types";
+import { RequestGate } from "./workspaceRefresh.ts";
+import { api, type Capture, type Packet } from "./types.ts";
 
 /** 详情请求、缓存和选中状态独立于列表刷新；迟到响应不能覆盖用户新选择。 */
 export function useMessageSelection(
   currentCapture: () => Capture | undefined,
   onRead: () => void,
+  pauseOnSelect: () => boolean = () => true,
 ) {
   const selected = shallowRef<Packet>();
   const selectedRowIndex = ref<number>();
@@ -24,7 +25,7 @@ export function useMessageSelection(
   async function selectDetail(row: Packet) {
     const capture = currentCapture();
     if (!capture) return;
-    onRead();
+    if (pauseOnSelect()) onRead();
     detailOpen.value = true;
     selectedRowIndex.value = row.index;
     detailTarget.value = row;

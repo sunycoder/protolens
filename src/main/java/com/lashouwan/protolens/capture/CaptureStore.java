@@ -508,14 +508,12 @@ public final class CaptureStore {
     }
 
     /** 握手后仅创建内存记录；用户选择保存之前不产生抓包文件或增量日志。 */
-    public synchronized String createLive(String connection, String endpoint, String extensions)
-            throws IOException {
+    public synchronized String createLive(String connection, String endpoint, String extensions) {
         return createLive(connection, endpoint, extensions, false);
     }
 
     public synchronized String createLive(
-            String connection, String endpoint, String extensions, boolean continued)
-            throws IOException {
+            String connection, String endpoint, String extensions, boolean continued) {
         if (liveCaptures.size() >= AnalyzerLimits.MAX_LIVE_RECORDS) {
             throw new IllegalArgumentException("临时记录达到 32 份，请先保存或删除不用的记录");
         }
@@ -790,7 +788,6 @@ public final class CaptureStore {
         return summary(capture);
     }
 
-    /** 活跃记录不能删除；关闭记录清除快照、旧日志和摘要，同时失效内存缓存。 */
     /** 清空本轮临时记录的消息和标记，保留记录 ID、字典、连接及名称，绝不修改历史文件。 */
     public synchronized Set<String> clearTemporary(Set<String> ids) {
         Set<String> cleared = new LinkedHashSet<>();
@@ -830,9 +827,16 @@ public final class CaptureStore {
 
     /** 列表只传输摘要，查询条件与筛选算法独立于持久化和实时缓存。 */
     public ObjectNode messages(String id, MessageQuery query) throws IOException {
+        return messages(id, query, false);
+    }
+
+    /** 页面可请求同刻活动快照，MCP 等既有查询默认不携带累计协议统计，保持结果预算。 */
+    public ObjectNode messages(String id, MessageQuery query, boolean includeActivity)
+            throws IOException {
         long started = System.nanoTime();
         ObjectNode capture;
         ObjectNode metadata;
+        ObjectNode activity;
         long acquired;
         long released;
         synchronized (this) {
@@ -849,9 +853,21 @@ public final class CaptureStore {
                 capture = queryView(id);
             }
             metadata = summary(capture);
+            activity =
+                    includeActivity && liveBuffers.containsKey(id)
+                            ? liveBuffers.get(id).activitySnapshot(mapper)
+                            : null;
             released = System.nanoTime();
         }
         ObjectNode result = messageQuery.messages(capture, query, metadata);
+        if (includeActivity) {
+            result.set(
+                    "activity",
+                    (activity == null
+                                    ? CaptureActivityTracker.retainedSnapshot(capture, mapper)
+                                    : activity)
+                            .put("captureId", id));
+        }
         result.put("lockWaitMs", (acquired - started) / 1_000_000.0)
                 .put("snapshotMs", (released - acquired) / 1_000_000.0)
                 .put("queryMs", (System.nanoTime() - released) / 1_000_000.0);
@@ -864,6 +880,93 @@ public final class CaptureStore {
         ObjectNode view = summary(source);
         view.set("messages", source.path("messages"));
         return view;
+    }
+
+    /** 统计和列表互相独立；实时记录不扫描消息体，历史记录在锁外只读重建。 */
+    public ObjectNode activity(String id) throws IOException {
+        ObjectNode view;
+        synchronized (this) {
+            if (liveBuffers.containsKey(id)) {
+                return liveBuffers.get(id).activitySnapshot(mapper).put("captureId", id);
+            }
+            view = queryView(id);
+        }
+        return CaptureActivityTracker.retainedSnapshot(view, mapper).put("captureId", id);
+    }
+
+    /** 在锁内冻结保留消息，锁外按列表筛选统计通知窗口；累计活动仍独立保存。 */
+    public ObjectNode activityWindow(String id, MessageQuery query) throws IOException {
+        ObjectNode view;
+        synchronized (this) {
+            view = queryView(id);
+        }
+        return messageQuery.activityWindow(view, query).put("captureId", id);
+    }
+
+    /** 同连接、方向、协议的后续消息，只统计当前保留范围；不要求旧详情消息仍在缓存中。 */
+    public ObjectNode latestSameProtocol(
+            String id,
+            String protocolId,
+            String protocolName,
+            String connection,
+            String direction,
+            int after)
+            throws IOException {
+        ObjectNode view;
+        synchronized (this) {
+            if (!protocolId.isBlank() && liveBuffers.containsKey(id)) {
+                view = summary(liveCaptures.get(id));
+                view.set("messages", liveBuffers.get(id).protocolSnapshot(protocolId, mapper));
+            } else {
+                view = queryView(id);
+            }
+        }
+        if (after < 0
+                || connection.isBlank()
+                || direction.isBlank()
+                || (protocolId.isBlank() && protocolName.isBlank())) {
+            throw new IllegalArgumentException("同协议后续消息查询缺少连接、方向或协议条件");
+        }
+        int count = 0;
+        JsonNode latest = null;
+        for (JsonNode message : view.path("messages")) {
+            if (message.path("index").asInt() <= after
+                    || !connection.equals(message.path("connection").asText())
+                    || !direction.equals(message.path("direction").asText())
+                    || !(protocolId.isBlank()
+                            ? protocolName.equals(message.path("protocolName").asText())
+                            : protocolId.equals(message.path("protocolId").asText()))) {
+                continue;
+            }
+            count++;
+            latest = message;
+        }
+        ObjectNode result =
+                mapper.createObjectNode()
+                        .put("count", count)
+                        .put("truncated", (long) after + 1 < view.path("firstIndex").asInt());
+        if (latest != null) {
+            ObjectNode item = result.putObject("latest");
+            for (String field :
+                    List.of(
+                            "index",
+                            "protocolId",
+                            "protocolName",
+                            "connection",
+                            "direction",
+                            "time",
+                            "status",
+                            "bytes",
+                            "wireBytes",
+                            "ordinal",
+                            "frameId",
+                            "compressed")) {
+                if (latest.has(field)) {
+                    item.set(field, latest.get(field).deepCopy());
+                }
+            }
+        }
+        return result;
     }
 
     /** 同一连接、方向及协议的前一条消息；不应用列表筛选，不推断请求响应关系。 */
@@ -927,7 +1030,7 @@ public final class CaptureStore {
         if (message == null) {
             throw new IllegalArgumentException("消息不存在、已被清空或已被缓存淘汰，请刷新列表");
         }
-        ObjectNode detail = (ObjectNode) message.deepCopy();
+        ObjectNode detail = message.deepCopy();
         String protocolId = detail.path("protocolId").asText();
         detail.set(
                 "schema",

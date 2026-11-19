@@ -30,6 +30,22 @@ import MessageComparison from "./MessageComparison.vue";
 import HighlightedText from "./HighlightedText.vue";
 import MessageRowActions from "./MessageRowActions.vue";
 import ProtocolOverview from "./ProtocolOverview.vue";
+import LiveAttentionBar from "./LiveAttentionBar.vue";
+import CopyText from "./CopyText.vue";
+import { useCaptureActivity } from "./useCaptureActivity";
+import { useActivityWindow } from "./useActivityWindow";
+import { useProtocolWatch } from "./useProtocolWatch";
+import { useInlineCopy } from "./useInlineCopy";
+import {
+  ATTENTION_STATUS,
+  activityQuery,
+  latestQuery,
+  readingRange,
+  relaxFilter,
+  type EmptyReason,
+  type ActivityDelta,
+} from "./liveReading";
+import { RequestGate } from "./workspaceRefresh";
 import ProtocolQueryPanel from "./ProtocolQueryPanel.vue";
 import {
   protocolMessageQuery,
@@ -119,7 +135,8 @@ const {
   selectDetail,
 } = useMessageSelection(
   () => capture.value,
-  () => pauseListForInteraction(),
+  () => pauseListForInteraction("selection"),
+  () => pauseOnSelect.value,
 );
 const expandedTags = ref(false);
 const columns = ref(readColumns(localStorage.getItem("analyzer.columns.v3")));
@@ -424,6 +441,9 @@ async function captureStopped() {
   const item = captures.value.find((item) => item.id === capture.value?.id);
   if (item) {
     capture.value = item;
+    emptyReasons.value = [];
+    laterMessages.value = undefined;
+    laterError.value = "";
     await loadMessages();
   }
 }
@@ -519,6 +539,11 @@ async function freezeOperation() {
 const mainWorkspace = ref<"captures" | "catalog">("captures");
 const protocolQueryTarget = shallowRef<ProtocolQueryTarget>();
 let protocolQuerySequence = 0;
+function returnCaptureWorkspace() {
+  mainWorkspace.value = "captures";
+  if (pauseReason.value === "catalog")
+    pauseReason.value = selected.value ? "selection" : "manual";
+}
 function openProtocolQuery(fromMessage = false) {
   pauseListForInteraction();
   if (
@@ -617,7 +642,7 @@ async function quickQuery(patch: Partial<WorkspaceQuery>) {
   const draft = draftQuery();
   const previous = readingPlace();
   const next = patchQuery(base, patch);
-  pauseListForInteraction();
+  pauseListForInteraction("filter");
   browsingHistory.value = true;
   await loadMessages(false, false, {
     query: next,
@@ -632,6 +657,14 @@ async function quickQuery(patch: Partial<WorkspaceQuery>) {
       if (draft.include !== before.include) include.value = draft.include;
       if (draft.exclude !== before.exclude) exclude.value = draft.exclude;
       undoPlace.value = previous;
+      actionFeedback.value = "";
+      if (patch.exclude !== undefined && patch.exclude !== before.exclude) {
+        const old = new Set(before.exclude.split(/[,，\s]+/).filter(Boolean));
+        const added = patch.exclude
+          .split(/[,，\s]+/)
+          .filter((token) => token && !old.has(token));
+        if (added.length) showActionFeedback(`已排除 ${added.length} 种协议`);
+      }
       workspaceView.value = "messages";
     },
   });
@@ -648,6 +681,7 @@ async function undoQuickQuery() {
     onCommit: () => {
       applyQuery(place.query);
       undoPlace.value = undefined;
+      actionFeedback.value = "";
     },
   });
   if (!queryError.value && capture.value?.id === place.captureId) {
@@ -804,11 +838,278 @@ watch(
 const importGuideDialog = ref(false);
 const errorText = ref("");
 const autoFollow = ref(true);
+const pauseOnSelect = ref(
+  readStored<unknown>("analyzer.pause-on-select.v1", true) !== false,
+);
+watch(pauseOnSelect, (value) =>
+  writeStored("analyzer.pause-on-select.v1", value),
+);
+const pauseReason = ref("manual");
+const activity = useCaptureActivity(() => capture.value);
+const protocolWatch = useProtocolWatch(
+  () => capture.value,
+  () => activity.latest.value,
+);
+const isFollowing = computed(() => autoFollow.value && !browsingHistory.value);
+const rawActivity = computed(() =>
+  isFollowing.value ? activity.recent.value : activity.unread.value,
+);
+const displayedActivity = computed(() => activityWindow.value.value);
+const pauseDescription = computed(() => {
+  if (pauseReason.value === "selection" && selected.value)
+    return `正在查看消息 #${selected.value.index}`;
+  return (
+    (
+      {
+        history: "正在翻阅历史",
+        filter: "正在查看筛选结果",
+        menu: "正在操作消息",
+        locate: "正在定位消息",
+        catalog: "正在查看协议定义",
+        manual: "手动暂停",
+      } as Record<string, string>
+    )[pauseReason.value] || "正在阅读"
+  );
+});
+const emptyReasons = shallowRef<EmptyReason[]>([]);
+const diagnosticTruncated = ref(false);
+const actionFeedback = ref("");
+let actionFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
+function showActionFeedback(message: string) {
+  actionFeedback.value = message;
+  if (actionFeedbackTimer) clearTimeout(actionFeedbackTimer);
+  actionFeedbackTimer = setTimeout(() => (actionFeedback.value = ""), 8000);
+}
+function setListFollow(value: boolean) {
+  if (!value) pauseListForInteraction("manual");
+  else autoFollow.value = true;
+}
+function pauseHistory() {
+  pauseListForInteraction("history");
+  browsingHistory.value = true;
+}
+function toggleWatch(row: Packet) {
+  const message = protocolWatch.toggle(row);
+  if (message) ElMessage.warning(message);
+}
+async function viewWatched(token: string) {
+  const id = capture.value?.id;
+  const count = protocolWatch.count(token);
+  await quickQuery({
+    include: token,
+    protocolId: "",
+    messageIndex: "",
+    q: "",
+    exclude: "",
+    range: "",
+  });
+  if (!queryError.value && capture.value?.id === id)
+    protocolWatch.acknowledge(token, count);
+}
+async function viewActivity(kind: "all" | "first" | "attention") {
+  const delta = displayedActivity.value;
+  const snapshot = activityWindow.source.value;
+  if (!delta || !delta.total || (kind === "first" && !delta.firstSeen.length))
+    return;
+  const id = capture.value?.id;
+  await quickQuery(activityQuery(delta, kind));
+  if (!queryError.value && capture.value?.id === id)
+    activity.acknowledge(snapshot);
+}
+async function removeBlockingFilter(reason: EmptyReason) {
+  await quickQuery(relaxFilter(displayedQuery.value || currentQuery(), reason));
+}
+const selectedMissingFromList = computed(
+  () =>
+    !!selected.value &&
+    !rows.value.some((row) => row.index === selected.value!.index),
+);
+const selectedOutsideRetention = computed(
+  () =>
+    !!selected.value &&
+    selected.value.index <
+      (activity.latest.value?.firstRetained ?? capture.value?.firstIndex ?? 0),
+);
+const laterMessages = shallowRef<{
+  count: number;
+  truncated: boolean;
+  latest?: Packet;
+}>();
+const laterError = ref("");
+const laterGate = new RequestGate();
+const detailReturn = shallowRef<{
+  captureId: string;
+  packet: Packet;
+  tab: string;
+  field: string;
+}>();
+let restoringDetailReading = false;
+watch(
+  () => capture.value?.id,
+  () => {
+    laterGate.cancel();
+    laterMessages.value = undefined;
+    detailReturn.value = undefined;
+  },
+);
+watch(
+  () => [
+    selected.value?.index,
+    selected.value?.connection,
+    activity.latest.value?.lastIndex,
+    activity.latest.value?.clearVersion,
+  ],
+  async (next, previous) => {
+    if (
+      !previous ||
+      next[0] !== previous[0] ||
+      next[1] !== previous[1] ||
+      next[3] !== previous[3]
+    )
+      laterMessages.value = undefined;
+    const packet = selected.value,
+      id = capture.value?.id;
+    const request = laterGate.begin();
+    if (
+      !packet ||
+      !id ||
+      !packet.connection ||
+      !packet.direction ||
+      (!packet.protocolName && packet.protocolId === undefined)
+    ) {
+      laterMessages.value = undefined;
+      return;
+    }
+    const params = new URLSearchParams({
+      after: String(packet.index),
+      protocolId:
+        packet.protocolId === undefined ? "" : String(packet.protocolId),
+      protocolName: packet.protocolName || "",
+      connection: packet.connection,
+      direction: packet.direction,
+    });
+    try {
+      const result = await api<{
+        count: number;
+        truncated: boolean;
+        latest?: Packet;
+      }>(`/api/captures/${id}/latest-protocol?${params}`, {
+        signal: request.signal,
+      });
+      if (
+        request.current() &&
+        selected.value === packet &&
+        capture.value?.id === id
+      ) {
+        laterMessages.value = result;
+        laterError.value = "";
+      }
+    } catch (error) {
+      if (request.current()) laterError.value = String(error);
+    }
+  },
+);
+async function restoreDetailReturn() {
+  const place = detailReturn.value;
+  if (!place || place.captureId !== capture.value?.id) return;
+  restoringDetailReading = true;
+  detailGate.cancel();
+  selected.value = place.packet;
+  selectedRowIndex.value = place.packet.index;
+  detailTarget.value = place.packet;
+  detailLoading.value = false;
+  detailError.value = "";
+  detailOpen.value = true;
+  detailReturn.value = undefined;
+  await nextTick();
+  restoringDetailReading = false;
+  tab.value = place.tab;
+  focusedField.value = place.field;
+  if (place.tab === "tree" && place.field) await focusField(place.field, false);
+}
+async function viewLatestProtocol(compare = false) {
+  const next = laterMessages.value?.latest,
+    packet = selected.value,
+    id = capture.value?.id;
+  if (!next || !packet || !id) return;
+  const previous = {
+    captureId: id,
+    packet,
+    tab: tab.value,
+    field: focusedField.value,
+  };
+  if (!detailReturn.value) detailReturn.value = previous;
+  await selectDetail(next);
+  if (capture.value?.id !== id) return;
+  if (!selected.value || selected.value.index !== next.index) {
+    const message = detailError.value;
+    detailReturn.value = previous;
+    await restoreDetailReturn();
+    laterError.value = message || "后续消息已不在保留范围，仍保留原详情";
+    return;
+  }
+  if (compare) {
+    comparisonBase.value = packet;
+    comparisonDialog.value = true;
+  }
+}
+const highlightedRow = ref<number>();
+const recentRows = shallowRef<Set<number>>(new Set());
+let rowHighlightTimer: ReturnType<typeof setTimeout> | undefined;
+let recentRowsTimer: ReturnType<typeof setTimeout> | undefined;
+function highlightRow(index: number) {
+  highlightedRow.value = index;
+  if (rowHighlightTimer) clearTimeout(rowHighlightTimer);
+  rowHighlightTimer = setTimeout(
+    () => (highlightedRow.value = undefined),
+    2200,
+  );
+}
+async function locatePinnedMessage() {
+  if (!selected.value) return;
+  if (selectedOutsideRetention.value) {
+    laterError.value = "原消息已不在保留范围，已打开的详情继续保留";
+    return;
+  }
+  pauseListForInteraction("locate");
+  const row = rows.value.find((row) => row.index === selected.value!.index);
+  if (row) {
+    await revealRow(row);
+    return;
+  }
+  await jumpToContext(selected.value, "connection", false);
+}
+const expandedFields = ref<Record<string, boolean>>({});
+const fieldExpansionCache = new Map<string, Record<string, boolean>>();
+watch(
+  () => selected.value && `${capture.value?.id}:${selected.value.index}`,
+  (key) => {
+    if (!key) return;
+    let saved = fieldExpansionCache.get(key);
+    if (!saved) {
+      saved = {};
+      fieldExpansionCache.set(key, saved);
+    }
+    expandedFields.value = saved;
+    if (fieldExpansionCache.size > 8)
+      fieldExpansionCache.delete(fieldExpansionCache.keys().next().value!);
+  },
+);
+function rememberExpansion(value: { path: string; open: boolean }) {
+  if (
+    value.path.length <= 2048 &&
+    (Object.hasOwn(expandedFields.value, value.path) ||
+      Object.keys(expandedFields.value).length < 500)
+  )
+    expandedFields.value[value.path] = value.open;
+}
+
 const browsingHistory = ref(false);
 const viewingTail = ref(false);
 const unread = shallowRef<Record<string, number>>({});
 const appliedSearch = ref("");
-function pauseListForInteraction() {
+function pauseListForInteraction(reason = "menu") {
+  pauseReason.value = reason;
   autoFollow.value = false;
   pendingLive = false;
   if (refreshTimer) clearTimeout(refreshTimer);
@@ -854,6 +1155,9 @@ watch(
 // 点选详情和实时未读计数不改变列表内容；避免因此重跑整页单元格和操作菜单。
 const tableRenderDeps = computed(() => [
   tableRevision.value,
+  protocolWatch.choices.value,
+  highlightedRow.value,
+  recentRows.value,
   batchExcluding.value,
   selectedProtocols.value,
   rows.value,
@@ -973,7 +1277,7 @@ const activeFilters = computed(() => {
   if (q.range)
     result.push({
       key: "range",
-      label: `区间：${capture.value?.marks[Number(q.range) - 1]?.name || q.range}`,
+      label: `区间：${readingRange(q.range, capture.value?.marks || [])?.name || q.range}`,
     });
   if (q.hideHeartbeat) result.push({ key: "heartbeat", label: "隐藏心跳" });
   return result;
@@ -1009,6 +1313,12 @@ function applyQuery(q: WorkspaceQuery) {
   order.value = q.order;
   selectedRange.value = q.range;
 }
+const activityWindow = useActivityWindow(
+  () => capture.value,
+  () => rawActivity.value,
+  () => displayedQuery.value || currentQuery(),
+  () => activity.latest.value,
+);
 function cancelQuery(message = "已取消本次查询，保留上次成功结果") {
   messageGate.cancel();
   queryPublication.cancel();
@@ -1118,6 +1428,7 @@ function tableScrollTop() {
 async function revealRow(target: Packet) {
   const id = capture.value?.id;
   locatedRow.value = target.index;
+  highlightRow(target.index);
   void select(target);
   await nextTick();
   if (capture.value?.id !== id || selectedRowIndex.value !== target.index)
@@ -1140,7 +1451,19 @@ async function revealRow(target: Packet) {
         (viewport.clientHeight - row.offsetHeight) / 2,
     );
 }
-async function focusField(path: string) {
+async function focusField(path: string, expandAncestors = true) {
+  const target = selected.value;
+  focusedField.value = "";
+  await nextTick();
+  if (selected.value !== target) return;
+  if (expandAncestors) {
+    rememberExpansion({ path: "", open: true });
+    let parent = "";
+    for (const part of path.split("/").slice(1, -1)) {
+      parent += "/" + part;
+      rememberExpansion({ path: parent, open: true });
+    }
+  }
   focusedField.value = path;
   tab.value = "tree";
   await nextTick();
@@ -1150,6 +1473,7 @@ async function focusField(path: string) {
   node?.scrollIntoView({ block: "center", inline: "nearest" });
 }
 watch([selected, detailQuery], async () => {
+  if (restoringDetailReading) return;
   focusedField.value = fieldMatches.value.matches[0]?.path || "";
   if (focusedField.value && tab.value === "tree")
     await focusField(focusedField.value);
@@ -1167,9 +1491,6 @@ let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 const bodyText = computed(() => pretty(selected.value?.body));
 const packetHexText = computed(() => hex(selected.value?.packetHex));
 const wireHexText = computed(() => hex(selected.value?.wireHex));
-const currentUnread = computed(() =>
-  capture.value ? unread.value[capture.value.id] || 0 : 0,
-);
 const detailMetadata = computed(() => {
   if (!selected.value) return {};
   const { body, schema, packetHex, wireHex, ...metadata } = selected.value;
@@ -1180,6 +1501,7 @@ const statusText: Record<string, string> = {
   [DecodeStatus.PARTIAL]: "部分解码",
   [DecodeStatus.FAILED]: "解码失败",
   [DecodeStatus.UNMAPPED]: "未映射",
+  [ATTENTION_STATUS]: "需关注（部分 / 失败 / 未映射）",
 };
 function failure(error: unknown) {
   errorText.value = error instanceof Error ? error.message : String(error);
@@ -1266,6 +1588,12 @@ async function refreshLive(
       };
     }
     const activeId = capture.value?.id;
+    if (
+      activeId &&
+      changedIds.includes(activeId) &&
+      (!autoFollow.value || browsingHistory.value)
+    )
+      void activity.refresh();
     if (
       activeId &&
       capture.value?.diskFirstIndex !== undefined &&
@@ -1355,7 +1683,11 @@ async function loadMessages(
     tail: String(tail),
   });
   if (query.range) {
-    const mark = capture.value.marks[Number(query.range) - 1];
+    const mark = readingRange(query.range, capture.value.marks);
+    if (!mark) {
+      cancelQuery("当前区间已不可用，请取消区间限制后重试");
+      return;
+    }
     if (mark) {
       params.set("from", String(mark.from));
       params.set("to", String(mark.to));
@@ -1381,7 +1713,27 @@ async function loadMessages(
     // 条件、计数、页码和数据在同一次同步发布中更新，失败与取消不会发布半套状态。
     navigation?.onCommit?.();
     displayedQuery.value = query;
+    const previousLast = rows.value.reduce(
+      (last, row) => Math.max(last, row.index),
+      -1,
+    );
+    if (background && previousLast >= 0) {
+      recentRows.value = new Set(
+        result.items
+          .filter((row) => row.index > previousLast)
+          .slice(0, 20)
+          .map((row) => row.index),
+      );
+      if (recentRowsTimer) clearTimeout(recentRowsTimer);
+      recentRowsTimer = setTimeout(() => (recentRows.value = new Set()), 1800);
+    }
     rows.value = reconcileRows(rows.value, result.items);
+    emptyReasons.value = result.emptyReasons || [];
+    diagnosticTruncated.value = !!result.diagnosticTruncated;
+    activity.publish(
+      result.activity,
+      tail && autoFollow.value && !browsingHistory.value,
+    );
     total.value = result.total;
     pageOffset.value = result.offset ?? (requestedPage - 1) * DEFAULT_PAGE_SIZE;
     displayedPage.value = Math.floor(pageOffset.value / DEFAULT_PAGE_SIZE) + 1;
@@ -1416,11 +1768,6 @@ async function loadMessages(
       if (request.current())
         packetTable.value?.setScrollTop(navigation.scrollTop);
     }
-    if (
-      selected.value &&
-      selected.value.index < (result.capture.firstIndex || 0)
-    )
-      selectedRowIndex.value = undefined;
     unread.value = { ...unread.value, [id]: 0 };
   } catch (error) {
     if (request.current())
@@ -1493,7 +1840,7 @@ async function openCapture(item: Capture, restore?: ReadingPlace) {
       });
       params.delete("range");
       const mark = restore.query.range
-        ? item.marks[Number(restore.query.range) - 1]
+        ? readingRange(restore.query.range, item.marks)
         : undefined;
       if (mark) {
         params.set("from", String(mark.from));
@@ -1553,6 +1900,8 @@ async function openCapture(item: Capture, restore?: ReadingPlace) {
   }
 }
 function filter() {
+  pauseListForInteraction("filter");
+  actionFeedback.value = "";
   undoPlace.value = undefined;
   expandedTags.value = false;
   jumpTarget.value = undefined;
@@ -1571,6 +1920,7 @@ function filter() {
 async function jumpToContext(
   row: Packet,
   scope: "connection" | "all" = contextScope.value,
+  hideContextHeartbeat?: boolean,
 ): Promise<void> {
   if (!capture.value) return;
   const id = capture.value.id;
@@ -1604,6 +1954,8 @@ async function jumpToContext(
     shown,
     scope === "connection" ? row.connection : "",
   );
+  if (hideContextHeartbeat !== undefined)
+    query.hideHeartbeat = hideContextHeartbeat;
   // 已经处于同一上下文页时直接定位，避免再次查排名、重载列表和丢失滚动位置。
   if (
     Object.entries(query).every(
@@ -1625,7 +1977,7 @@ async function jumpToContext(
   queryError.value = "";
   browsingHistory.value = true;
   autoFollow.value = false;
-  retryAction.value = () => jumpToContext(row, scope);
+  retryAction.value = () => jumpToContext(row, scope, hideContextHeartbeat);
   const timer = setTimeout(() => {
     if (request.current()) cancelQuery("上下文定位超时，已保留原结果，可重试");
   }, DETAIL_REQUEST_TIMEOUT_MS);
@@ -1690,6 +2042,7 @@ async function returnToSearch(): Promise<void> {
   });
 }
 function changePage(value: number) {
+  pauseHistory();
   if (value === displayedPage.value && !loading.value) return;
   jumpTarget.value = undefined;
   locatedRow.value = undefined;
@@ -1698,6 +2051,7 @@ function changePage(value: number) {
   void loadMessages();
 }
 function browseHistory() {
+  pauseHistory();
   browsingHistory.value = true;
   page.value =
     (displayedQuery.value?.order || order.value) === "desc"
@@ -1711,7 +2065,14 @@ function jumpLatest() {
   selectedProtocols.value = [];
   browsingHistory.value = false;
   if (!autoFollow.value) autoFollow.value = true;
-  else void loadMessages(true);
+  else void loadLatestMessages();
+}
+function loadLatestMessages() {
+  const query = latestQuery(displayedQuery.value || currentQuery());
+  return loadMessages(true, false, {
+    query,
+    onCommit: () => applyQuery(query),
+  });
 }
 function captureName(item: Capture) {
   if (
@@ -1739,6 +2100,7 @@ async function neighbour(delta: number) {
     pageOffset.value,
   );
   if (!next) return;
+  pauseListForInteraction("history");
   browsingHistory.value = true;
   autoFollow.value = false;
   if (index + delta >= 0 && index + delta < rows.value.length) {
@@ -1781,10 +2143,14 @@ watch(autoFollow, (value) => {
     !browsingHistory.value &&
     capture.value?.liveState === "CAPTURING"
   )
-    void loadMessages(true);
+    void loadLatestMessages();
 });
 onBeforeUnmount(() => {
   saveReadingPlace();
+  laterGate.cancel();
+  if (actionFeedbackTimer) clearTimeout(actionFeedbackTimer);
+  if (rowHighlightTimer) clearTimeout(rowHighlightTimer);
+  if (recentRowsTimer) clearTimeout(recentRowsTimer);
   window.removeEventListener("beforeunload", saveReadingPlace);
   window.removeEventListener("resize", measureWorkspace);
   window.removeEventListener("keydown", handleWorkspaceKey);
@@ -1919,15 +2285,10 @@ function time(value: string) {
         fractionalSecondDigits: 3,
       });
 }
+const detailCopy = useInlineCopy();
+watch(selected, detailCopy.reset);
 async function copy() {
-  try {
-    await navigator.clipboard.writeText(
-      pretty(selected.value?.body ?? selected.value),
-    );
-    ElMessage.success("已复制");
-  } catch (error) {
-    failure(error);
-  }
+  await detailCopy.copy(pretty(selected.value?.body ?? selected.value));
 }
 onMounted(async () => {
   window.addEventListener("beforeunload", saveReadingPlace);
@@ -1980,7 +2341,7 @@ onMounted(async () => {
       <el-button
         text
         :type="mainWorkspace === 'captures' ? 'primary' : 'default'"
-        @click="mainWorkspace = 'captures'"
+        @click="returnCaptureWorkspace"
         >抓包分析</el-button
       >
       <el-button
@@ -2045,7 +2406,10 @@ onMounted(async () => {
     <LiveCapturePanel
       v-show="mainWorkspace === 'captures'"
       ref="livePanel"
-      v-model:follow="autoFollow"
+      :follow="autoFollow"
+      :pause-on-select="pauseOnSelect"
+      @update:follow="setListFollow"
+      @update:pause-on-select="pauseOnSelect = $event"
       :active-capture-id="capture?.id"
       @changed="refreshLive"
       @open="openLiveCapture"
@@ -2068,7 +2432,8 @@ onMounted(async () => {
       :capture="capture"
       :target="protocolQueryTarget"
       :catalog-version="health.catalog.sha256"
-      @close="mainWorkspace = 'captures'"
+      :return-label="selected ? `返回消息 #${selected.index}` : '返回抓包'"
+      @close="returnCaptureWorkspace"
       @messages="showProtocolMessages"
       @settings="openSettings"
     />
@@ -2223,9 +2588,7 @@ onMounted(async () => {
               class="reading-hint"
               title="后台采集继续，新消息不会改变当前位置"
               >正在采集 ·
-              {{
-                autoFollow && !browsingHistory ? "跟随最新" : "阅读历史"
-              }}</span
+              {{ isFollowing ? "跟随最新" : pauseDescription }}</span
             >
           </div>
           <div class="capture-actions">
@@ -2500,17 +2863,6 @@ onMounted(async () => {
                 >恢复默认布局</el-button
               >
             </el-popover>
-            <el-button
-              v-if="capture?.liveState === 'CAPTURING'"
-              :type="currentUnread ? 'primary' : 'default'"
-              class="jump-latest"
-              @click="jumpLatest"
-              >{{
-                currentUnread
-                  ? `${currentUnread} 条新增 · 回到最新`
-                  : "回到最新"
-              }}</el-button
-            >
           </div>
           <div
             v-if="activeFilters.length"
@@ -2620,6 +2972,39 @@ onMounted(async () => {
             capture.continuousError || capture.recoveryWarning
           }}；请核对磁盘与内存保留范围。
         </div>
+        <LiveAttentionBar
+          v-if="
+            capture &&
+            (capture.liveState === 'CAPTURING' ||
+              protocolWatch.choices.value.length ||
+              displayedActivity?.total)
+          "
+          :running="capture.liveState === 'CAPTURING'"
+          :following="isFollowing"
+          :reason="pauseDescription"
+          :delta="displayedActivity"
+          :watched="protocolWatch.choices.value"
+          :activity-error="activityWindow.error.value || activity.error.value"
+          :loading="activityWindow.loading.value"
+          @latest="jumpLatest"
+          @activity="viewActivity"
+          @watch="viewWatched"
+          @unwatch="protocolWatch.remove"
+          @retry="
+            () => {
+              activity.refresh();
+              activityWindow.refresh();
+            }
+          "
+        />
+        <div
+          v-if="actionFeedback && undoPlace"
+          class="local-action-feedback"
+          role="status"
+        >
+          {{ actionFeedback }}
+          <el-button text size="small" @click="undoQuickQuery">撤销</el-button>
+        </div>
         <div ref="dataRegion" class="data-region">
           <ProtocolOverview
             v-if="workspaceView === 'protocols' && capture"
@@ -2688,7 +3073,11 @@ onMounted(async () => {
                   :fit="true"
                   :row-class-name="
                     ({ row }: { row: Packet }) =>
-                      row.index === locatedRow ? 'located-row' : ''
+                      [
+                        row.index === highlightedRow ? 'located-row' : '',
+                        recentRows.has(row.index) ? 'recent-row' : '',
+                        protocolWatch.has(row) ? 'watched-row' : '',
+                      ].join(' ')
                   "
                   height="100%"
                   highlight-current-row
@@ -2721,6 +3110,27 @@ onMounted(async () => {
                                 : "检查协议 ID、消息序号、方向、排除条件与心跳设置。"
                         }}
                       </p>
+                      <div
+                        v-for="reason in emptyReasons"
+                        :key="reason.field"
+                        class="empty-reason"
+                      >
+                        <span>{{ reason.description }}</span
+                        ><el-button
+                          size="small"
+                          @click="removeBlockingFilter(reason)"
+                          >{{ reason.action }}</el-button
+                        >
+                      </div>
+                      <p v-if="diagnosticTruncated" class="muted">
+                        诊断已达到扫描预算或跳过大包正文，未找到原因不代表协议不存在。
+                      </p>
+                      <el-button
+                        v-if="total > 0 && !rows.length && !loading"
+                        size="small"
+                        @click="loadMessages(false, false, { page: 1 })"
+                        >返回结果第一页</el-button
+                      >
                       <el-button
                         v-if="queryError"
                         size="small"
@@ -2790,15 +3200,25 @@ onMounted(async () => {
                     width="230"
                     show-overflow-tooltip
                     ><template #default="{ row }"
-                      ><button
-                        class="protocol-name protocol-button"
-                        :title="`${row.protocolName || '未识别消息'} · ${navigatingSearchResult ? '定位上下文并查看详情' : '查看详情'}`"
-                        @click.stop="openProtocol(row)"
-                      >
-                        <HighlightedText
-                          :text="row.protocolName || '未识别消息'"
-                          :query="detailQuery"
-                        /></button></template
+                      ><span class="protocol-cell"
+                        ><button
+                          class="protocol-watch-toggle"
+                          :class="{ watched: protocolWatch.has(row) }"
+                          :aria-label="`${protocolWatch.has(row) ? '取消关注' : '关注'}协议 ${row.protocolName || row.protocolId}`"
+                          :aria-pressed="protocolWatch.has(row)"
+                          :disabled="!protocolChoice(row)"
+                          @click.stop="toggleWatch(row)"
+                        >
+                          {{ protocolWatch.has(row) ? "★" : "☆" }}</button
+                        ><button
+                          class="protocol-name protocol-button"
+                          :title="`${row.protocolName || '未识别消息'} · ${navigatingSearchResult ? '定位上下文并查看详情' : '查看详情'}`"
+                          @click.stop="openProtocol(row)"
+                        >
+                          <HighlightedText
+                            :text="row.protocolName || '未识别消息'"
+                            :query="detailQuery"
+                          /></button></span></template
                   ></el-table-column>
                   <el-table-column
                     prop="preview"
@@ -2829,7 +3249,7 @@ onMounted(async () => {
                         class="row-menu"
                         :aria-label="`消息 #${row.index} 操作`"
                         aria-haspopup="dialog"
-                        @pointerdown.stop="pauseListForInteraction"
+                        @pointerdown.stop="pauseListForInteraction()"
                         @click.stop="rowActions?.open($event, row)"
                       >
                         ⋯
@@ -2870,11 +3290,10 @@ onMounted(async () => {
                     width="112"
                     show-overflow-tooltip
                     ><template #default="{ row }"
-                      ><span :title="row.connection">{{
-                        row.connection.slice(0, 8)
-                      }}</span></template
-                    ></el-table-column
-                  >
+                      ><CopyText
+                        :value="row.connection"
+                        label="完整连接 ID" /></template
+                  ></el-table-column>
                 </el-table>
                 <MessageRowActions
                   ref="rowActions"
@@ -2888,7 +3307,7 @@ onMounted(async () => {
                 <div class="pagination">
                   <span class="muted">{{
                     viewingTail
-                      ? `最新 ${rows.length} 条 / 匹配 ${total} 条`
+                      ? `${isFollowing ? "最新" : "暂停窗口"} ${rows.length} 条 / 匹配 ${total} 条`
                       : `匹配 ${total} 条 · ${displayedQuery?.order === "desc" ? "最新在前" : "最早在前"} · ${displayedAt || "尚无查询结果"}`
                   }}</span>
                   <el-button
@@ -2944,9 +3363,9 @@ onMounted(async () => {
                     @click="openProtocolQuery(true)"
                     >查看协议定义</el-button
                   >
-                  <el-button v-if="selected" text size="small" @click="copy"
-                    >复制 JSON</el-button
-                  >
+                  <el-button v-if="selected" text size="small" @click="copy">{{
+                    detailCopy.feedback.value || "复制 JSON"
+                  }}</el-button>
                   <el-button
                     v-if="selected"
                     text
@@ -3030,6 +3449,52 @@ onMounted(async () => {
                     {{ detailTarget.protocolId ?? "未知" }}</span
                   >
                 </div>
+                <div v-if="detailReturn" class="detail-reading-banner">
+                  <el-button text size="small" @click="restoreDetailReturn"
+                    >返回固定消息 #{{ detailReturn.packet.index }}</el-button
+                  >
+                </div>
+                <div
+                  v-if="selected"
+                  class="detail-reading-banner"
+                  role="status"
+                >
+                  <strong
+                    >固定查看：消息 #{{ selected.index }} ·
+                    {{ selected.protocolName || selected.protocolId }}</strong
+                  >
+                  <span v-if="selectedOutsideRetention"
+                    >已不在保留范围，详情继续保留</span
+                  ><span v-else-if="selectedMissingFromList"
+                    >当前列表未显示此消息</span
+                  >
+                  <el-button
+                    text
+                    size="small"
+                    :disabled="selectedOutsideRetention"
+                    @click="locatePinnedMessage"
+                    >定位此消息</el-button
+                  >
+                  <template v-if="laterMessages?.count"
+                    ><span
+                      >同连接、同方向、同协议后续{{
+                        laterMessages.truncated ? "至少" : ""
+                      }}
+                      {{ laterMessages.count }} 条（保留范围）</span
+                    ><el-button
+                      text
+                      size="small"
+                      @click="viewLatestProtocol(false)"
+                      >查看最新一条</el-button
+                    ><el-button
+                      text
+                      size="small"
+                      @click="viewLatestProtocol(true)"
+                      >与当前对比</el-button
+                    ></template
+                  >
+                  <span v-if="laterError" class="muted">{{ laterError }}</span>
+                </div>
                 <div v-if="detailLoading" class="detail-state" role="status">
                   正在加载消息 #{{ detailTarget?.index }}，旧消息内容已隐藏。
                 </div>
@@ -3112,9 +3577,11 @@ onMounted(async () => {
                       ><div v-if="tab === 'tree'" class="detail-content">
                         <JsonTree
                           v-if="selected?.body !== undefined"
-                          :key="selected.index"
                           :value="selected.body"
                           :match-paths="matchPaths"
+                          :key="`${capture?.id}:${selected.index}`"
+                          :expansion-state="expandedFields"
+                          @expansion="rememberExpansion"
                           :focused-path="focusedField"
                         />
                         <div v-else class="empty-detail">

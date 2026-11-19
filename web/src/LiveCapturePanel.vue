@@ -37,11 +37,16 @@ interface LiveStatus {
   version: number;
   generation?: string;
 }
-const props = defineProps<{ activeCaptureId?: string; follow: boolean }>();
+const props = defineProps<{
+  activeCaptureId?: string;
+  follow: boolean;
+  pauseOnSelect: boolean;
+}>();
 const emit = defineEmits<{
   changed: [connections: CaptureProgress[], changedIds: string[]];
   open: [captureId: string];
   "update:follow": [value: boolean];
+  "update:pauseOnSelect": [value: boolean];
   stopped: [];
   cleared: [ids: string[]];
   identityChanged: [capture: Capture];
@@ -104,7 +109,7 @@ const nextStep = computed(() => {
   if (state.value.source && state.value.receivedFrames > 0)
     return {
       title: "正在采集",
-      hint: `已收到 ${state.value.receivedFrames} 帧；点击消息只暂停列表跟随，后台采集继续。`,
+      hint: `已收到 ${state.value.receivedFrames} 帧；详情固定查看，后台采集继续；可选择列表是否跟随新消息。`,
     };
   if (
     proxy.value?.supported &&
@@ -333,7 +338,13 @@ onBeforeUnmount(() => {
         :model-value="follow"
         size="small"
         @update:model-value="emit('update:follow', !!$event)"
-        >跟随当前记录</el-checkbox
+        >跟随新消息</el-checkbox
+      >
+      <el-checkbox
+        :model-value="pauseOnSelect"
+        size="small"
+        @update:model-value="emit('update:pauseOnSelect', !!$event)"
+        >选中消息后暂停跟随</el-checkbox
       >
       <el-button
         size="small"

@@ -26,6 +26,36 @@ public final class CaptureController {
     }
 
     public void register(Router router) {
+        router.get("/api/captures/:id/activity-window")
+                .handler(
+                        context ->
+                                http.worker(
+                                        context,
+                                        () ->
+                                                captures.activityWindow(
+                                                        context.pathParam("id"), query(context))));
+        router.get("/api/captures/:id/activity")
+                .handler(
+                        context ->
+                                http.worker(
+                                        context, () -> captures.activity(context.pathParam("id"))));
+        router.get("/api/captures/:id/latest-protocol")
+                .handler(
+                        context ->
+                                http.worker(
+                                        context,
+                                        () ->
+                                                captures.latestSameProtocol(
+                                                        context.pathParam("id"),
+                                                        context.request()
+                                                                .getParam("protocolId", ""),
+                                                        context.request()
+                                                                .getParam("protocolName", ""),
+                                                        context.request()
+                                                                .getParam("connection", ""),
+                                                        context.request().getParam("direction", ""),
+                                                        integer(context, "after", -1))));
+
         router.post("/api/captures/:id/reidentify")
                 .handler(
                         context ->
@@ -137,7 +167,9 @@ public final class CaptureController {
                                         context,
                                         () ->
                                                 captures.messages(
-                                                        context.pathParam("id"), query(context))));
+                                                        context.pathParam("id"),
+                                                        query(context),
+                                                        true)));
         router.get("/api/captures/:id/messages/:index")
                 .handler(
                         context ->

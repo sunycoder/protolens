@@ -34,6 +34,7 @@ final class LiveMessageBuffer {
 
     private long clearVersion;
     private final ObjectNode counts;
+    private final CaptureActivityTracker activity = new CaptureActivityTracker();
 
     LiveMessageBuffer(int maxMessages, long maxBytes, ObjectMapper mapper) {
         this.maxMessages = maxMessages;
@@ -46,6 +47,7 @@ final class LiveMessageBuffer {
         item.put("index", nextIndex);
         int size = mapper.writeValueAsBytes(item).length;
         nextIndex++;
+        activity.append(item, mapper);
         messages.addLast(item);
         indexedMessages.put(item.path("index").asInt(), item);
         protocolMessages
@@ -104,6 +106,13 @@ final class LiveMessageBuffer {
 
     ObjectNode messageAt(int index) {
         return indexedMessages.get(index);
+    }
+
+    ObjectNode activitySnapshot(ObjectMapper mapper) {
+        return activity.snapshot(
+                mapper,
+                clearVersion,
+                messages.isEmpty() ? nextIndex : messages.getFirst().path("index").asInt());
     }
 
     void describe(ObjectNode capture) {

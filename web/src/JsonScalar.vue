@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { SCALAR_PREVIEW_LENGTH, SCALAR_EXPANSION_CHUNK } from "./constants";
 import { computed, ref, watch } from "vue";
-import { ElMessage } from "element-plus";
+import { useInlineCopy } from "./useInlineCopy";
+const inlineCopy = useInlineCopy();
 const props = defineProps<{ value: unknown }>();
 const limit = ref(SCALAR_PREVIEW_LENGTH);
 const text = computed(() => JSON.stringify(props.value) ?? String(props.value));
@@ -10,17 +11,13 @@ watch(
   () => props.value,
   () => {
     limit.value = SCALAR_PREVIEW_LENGTH;
+    inlineCopy.reset();
   },
 );
 async function copyValue() {
-  try {
-    await navigator.clipboard.writeText(
-      typeof props.value === "string" ? props.value : text.value,
-    );
-    ElMessage.success("已复制完整字段值");
-  } catch {
-    ElMessage.error("复制失败，请展开字段值后手动复制");
-  }
+  await inlineCopy.copy(
+    typeof props.value === "string" ? props.value : text.value,
+  );
 }
 </script>
 <template>
@@ -50,7 +47,7 @@ async function copyValue() {
       @click.stop="copyValue"
       title="复制完整字段值"
     >
-      复制值
+      {{ inlineCopy.feedback.value || "复制值" }}
     </button>
   </span>
 </template>

@@ -12,7 +12,15 @@ const props = defineProps<{
   path?: string;
   matchPaths?: string[];
   focusedPath?: string;
+  expansionState?: Record<string, boolean>;
 }>();
+const emit = defineEmits<{
+  expansion: [value: { path: string; open: boolean }];
+}>();
+function toggle(event: Event) {
+  expanded.value = (event.target as HTMLDetailsElement).open;
+  emit("expansion", { path: path.value, open: expanded.value });
+}
 const path = computed(() => props.path || "");
 const matched = computed(() => props.matchPaths?.includes(path.value));
 const containsMatch = computed(() =>
@@ -26,13 +34,21 @@ watch(
   () => props.value,
   () => {
     limit.value = JSON_CHILD_PAGE_SIZE;
-    expanded.value = (props.depth || 0) < 1 || !!containsMatch.value;
+    expanded.value =
+      props.expansionState?.[path.value] ??
+      ((props.depth || 0) < 1 || !!containsMatch.value);
   },
   { immediate: true },
 );
 watch(containsMatch, (value) => {
   if (value) expanded.value = true;
 });
+watch(
+  () => props.expansionState?.[path.value],
+  (value) => {
+    if (typeof value === "boolean") expanded.value = value;
+  },
+);
 const objectKeys = computed(() =>
   props.value !== null &&
   typeof props.value === "object" &&
@@ -62,7 +78,7 @@ const visibleKeys = computed(() =>
   <details
     v-if="value !== null && typeof value === 'object'"
     :open="expanded"
-    @toggle="expanded = ($event.target as HTMLDetailsElement).open"
+    @toggle="toggle"
     class="json-tree"
     :class="{
       'json-match': matched,
@@ -83,6 +99,8 @@ const visibleKeys = computed(() =>
       :path="pointerChild(path, key)"
       :match-paths="matchPaths"
       :focused-path="focusedPath"
+      :expansion-state="expansionState"
+      @expansion="emit('expansion', $event)"
     />
     <button
       v-if="expanded && count > limit"
