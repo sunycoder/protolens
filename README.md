@@ -170,7 +170,7 @@ macOS / Linux 使用 `sh` 运行脚本，不依赖下载或拷贝后是否保留
 
 ### 打包参数与产物
 
-构建需 JDK 21、Node/npm；缺少默认 mitmdump 时会自动准备；Windows 安装器另需 **WiX 3**，便携版无需 WiX。Node 默认从 PATH 查找，mitmdump 在 Windows 默认取 `data/mitmproxy/mitmdump.exe`，在 macOS / Linux 默认取 `data/mitmproxy/mitmdump`。工具不在默认位置时：
+构建需 JDK 21、Node/npm；缺少默认采集器时会自动准备；Windows 安装器另需 **WiX 3**，便携版无需 WiX。Node 默认从 PATH 查找；采集器在 Windows 默认取 `data/mitmproxy/mitmdump.exe`，Linux 取 `data/mitmproxy/mitmdump`，macOS 取 `data/mitmproxy/mitmproxy.app/Contents/MacOS/mitmdump`。macOS 必须保留官方完整 `.app` 中的 Python 框架、资源与符号链接，不能只复制单个 mitmdump；显式设置 `analyzerMitmdumpExecutable` 时也应指向完整应用内部的该路径。工具不在默认位置时：
 
 ```powershell
 .\gradlew.bat packageInstaller `

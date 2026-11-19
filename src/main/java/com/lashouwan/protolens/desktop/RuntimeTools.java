@@ -19,6 +19,13 @@ public final class RuntimeTools {
     }
 
     public static Path collector(AnalyzerLaunchOptions options) {
+        if (RuntimePlatform.current().os().equals("macos")) {
+            Path relative = Path.of("mitmproxy.app/Contents/MacOS/mitmdump");
+            Path bundled = options.moduleRoot().resolve("runtime-tools").resolve(relative);
+            return Files.isRegularFile(bundled)
+                    ? bundled
+                    : options.dataDirectory().resolve("mitmproxy").resolve(relative);
+        }
         String name = "mitmdump" + RuntimePlatform.current().executableSuffix();
         Path bundled = options.moduleRoot().resolve("runtime-tools").resolve(name);
         return Files.isRegularFile(bundled)

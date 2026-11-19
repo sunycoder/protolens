@@ -237,13 +237,15 @@ try {
     "包名与对外版本不一致",
   );
   const root = join(app, "Contents/app");
+  const collectorBundle = join(root, "runtime-tools/mitmproxy.app");
+  const collectorExecutable = join(collectorBundle, "Contents/MacOS/mitmdump");
   const javaHome = join(app, "Contents/runtime/Contents/Home");
   const expectedMachArch = architecture === "arm64" ? "arm64" : "x86_64";
   for (const binary of [
     launcher,
     join(javaHome, "lib/server/libjvm.dylib"),
     join(root, "runtime-tools/node"),
-    join(root, "runtime-tools/mitmdump"),
+    collectorExecutable,
   ]) {
     assert.ok(existsSync(binary), `安装包缺少运行文件：${binary}`);
     assert.ok(
@@ -258,6 +260,12 @@ try {
     /JAVA_VERSION="21[."]/,
   );
   const node = join(root, "runtime-tools/node");
+  assert.ok(
+    existsSync(
+      join(collectorBundle, "Contents/Frameworks/libpython3.15.dylib"),
+    ),
+    "缺少采集器 Python 运行库",
+  );
   assert.equal(
     command(node, ["-p", 'process.platform+"-"+process.arch']),
     `darwin-${process.arch}`,
@@ -270,10 +278,7 @@ try {
     ],
     { cwd: root },
   );
-  assert.match(
-    command(join(root, "runtime-tools/mitmdump"), ["--version"]),
-    /Mitmproxy:/,
-  );
+  assert.match(command(collectorExecutable, ["--version"]), /Mitmproxy:/);
   await smoke("native");
   // open 使用与 Finder 双击相同的 Launch Services 路径；此项也必须成功才能上传发布产物。
   await smoke("finder");
