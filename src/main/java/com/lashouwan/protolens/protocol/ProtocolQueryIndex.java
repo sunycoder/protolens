@@ -145,7 +145,7 @@ public final class ProtocolQueryIndex {
         Map<String, ProtocolSearchHit> matches = new HashMap<>();
         if (terms.length == 0) {
             for (ProtocolCatalogEntry entry : entries.values()) {
-                if (scope != ProtocolSearchScope.STRUCTURE ? entry.message() : !entry.message()) {
+                if ((scope != ProtocolSearchScope.STRUCTURE) == entry.message()) {
                     matches.put(entry.key(), new ProtocolSearchHit(100, "全部定义", ""));
                 }
             }
