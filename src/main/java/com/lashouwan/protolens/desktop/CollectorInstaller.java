@@ -22,7 +22,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
-/** 缺少随包采集器时自动准备固定版本；校验官方归档后只提取程序，不安装证书或修改代理。 */
+/** 缺少随包采集器时自动准备固定版本；macOS 保留完整官方应用，不安装证书或修改代理。 */
 public final class CollectorInstaller {
     private static final long MAX_EXECUTABLE_BYTES = 128L * 1024 * 1024;
 
@@ -60,7 +60,20 @@ public final class CollectorInstaller {
         if (Files.isRegularFile(executable)) {
             return executable;
         }
-        Path directory = Files.createDirectories(executable.toAbsolutePath().getParent());
+        boolean macBundle =
+                RuntimePlatform.current().os().equals("macos")
+                        && !archive.getPath().toLowerCase(java.util.Locale.ROOT).endsWith(".zip");
+        Path bundle =
+                macBundle ? executable.toAbsolutePath().getParent().getParent().getParent() : null;
+        if (macBundle
+                && (!bundle.getFileName().toString().equals("mitmproxy.app")
+                        || !bundle.resolve("Contents/MacOS/mitmdump")
+                                .equals(executable.toAbsolutePath()))) {
+            throw new IOException("macOS 采集器目标必须保留 mitmproxy.app/Contents/MacOS/mitmdump 结构");
+        }
+        Path directory =
+                Files.createDirectories(
+                        macBundle ? bundle.getParent() : executable.toAbsolutePath().getParent());
         try (FileChannel channel =
                         FileChannel.open(
                                 directory.resolve("collector-install.lock"),
@@ -78,8 +91,15 @@ public final class CollectorInstaller {
                     throw new IOException("采集器归档 SHA-256 校验失败，未安装任何程序");
                 }
                 extractExecutable(downloaded, executable.getFileName().toString(), extracted);
+                if (macBundle) {
+                    publishMacBundle(extracted.resolve("mitmproxy.app"), bundle);
+                    return executable;
+                }
                 try {
-                    Files.move(extracted.resolve(executable.getFileName()), executable, StandardCopyOption.ATOMIC_MOVE);
+                    Files.move(
+                            extracted.resolve(executable.getFileName()),
+                            executable,
+                            StandardCopyOption.ATOMIC_MOVE);
                 } catch (AtomicMoveNotSupportedException unsupported) {
                     Files.move(extracted.resolve(executable.getFileName()), executable);
                 }
@@ -91,6 +111,30 @@ public final class CollectorInstaller {
                 Files.deleteIfExists(downloaded);
                 deleteTree(extracted);
             }
+        }
+    }
+
+    /** 发布完整的 macOS 采集器应用，目录移动保留 Python 框架与资源间的符号链接。 新应用替换失败时恢复旧应用；恢复也失败则保留备份并抛出异常，不清理最后可用副本。 */
+    static void publishMacBundle(Path staged, Path destination) throws IOException {
+        Path backupRoot = Files.createTempDirectory(destination.getParent(), "collector-previous-");
+        Path backup = backupRoot.resolve("mitmproxy.app");
+        boolean hadPrevious = false;
+        boolean published = false;
+        try {
+            if (Files.isSymbolicLink(destination)) {
+                throw new IOException("采集器应用目录不能是外部符号链接");
+            }
+            if (Files.exists(destination)) {
+                Files.move(destination, backup);
+                hadPrevious = true;
+            }
+            Files.move(staged, destination);
+            published = true;
+        } catch (IOException failure) {
+            if (hadPrevious) Files.move(backup, destination);
+            throw failure;
+        } finally {
+            if (published || !Files.exists(backup)) deleteTree(backupRoot);
         }
     }
 
@@ -137,9 +181,9 @@ public final class CollectorInstaller {
         return HexFormat.of().formatHex(digest.digest());
     }
 
-    private void extractExecutable(Path archive, String name, Path target)
-            throws IOException {
-        boolean zipArchive = this.archive.getPath().toLowerCase(java.util.Locale.ROOT).endsWith(".zip");
+    private void extractExecutable(Path archive, String name, Path target) throws IOException {
+        boolean zipArchive =
+                this.archive.getPath().toLowerCase(java.util.Locale.ROOT).endsWith(".zip");
         if (!zipArchive && !RuntimePlatform.current().os().equals("windows")) {
             extractTarGz(archive, name, target);
             return;
@@ -175,15 +219,31 @@ public final class CollectorInstaller {
     }
 
     private static void extractTarGz(Path archive, String name, Path target) throws IOException {
-        Process process = new ProcessBuilder("tar", "-xzf", archive.toString(), "-C", target.toString())
-                .redirectErrorStream(true).start();
+        Process process =
+                new ProcessBuilder("tar", "-xzf", archive.toString(), "-C", target.toString())
+                        .redirectErrorStream(true)
+                        .start();
         try {
             if (process.waitFor(180, TimeUnit.SECONDS) && process.exitValue() == 0) {
                 try (var paths = Files.walk(target)) {
-                    Path executable = paths.filter(Files::isRegularFile)
-                            .filter(path -> path.getFileName().toString().equals(name)).findFirst()
-                            .orElseThrow(() -> new IOException("官方归档缺少采集器：" + name));
+                    Path executable =
+                            paths.filter(Files::isRegularFile)
+                                    .filter(path -> path.getFileName().toString().equals(name))
+                                    .findFirst()
+                                    .orElseThrow(() -> new IOException("官方归档缺少采集器：" + name));
                     Path output = target.resolve(name);
+                    if (RuntimePlatform.current().os().equals("macos")) {
+                        Path bundle = executable.getParent().getParent().getParent();
+                        if (!bundle.getFileName().toString().equals("mitmproxy.app")
+                                || !Files.isDirectory(bundle.resolve("Contents/Frameworks"))
+                                || !Files.isDirectory(bundle.resolve("Contents/Resources"))) {
+                            throw new IOException("官方归档缺少完整 macOS 采集器应用");
+                        }
+                        validateNativeExecutable(executable);
+                        Path outputBundle = target.resolve("mitmproxy.app");
+                        if (!bundle.equals(outputBundle)) Files.move(bundle, outputBundle);
+                        return;
+                    }
                     Files.move(executable, output, StandardCopyOption.REPLACE_EXISTING);
                     validateNativeExecutable(output);
                     return;
@@ -199,10 +259,22 @@ public final class CollectorInstaller {
     private static void validateNativeExecutable(Path file) throws IOException {
         try (InputStream input = Files.newInputStream(file)) {
             byte[] magic = input.readNBytes(4);
-            boolean valid = RuntimePlatform.current().os().equals("linux")
-                    ? magic.length >= 4 && magic[0] == 0x7f && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F'
-                    : magic.length >= 4 && ((magic[0] == (byte) 0xcf && magic[1] == (byte) 0xfa && magic[2] == (byte) 0xed && magic[3] == (byte) 0xfe)
-                    || (magic[0] == (byte) 0xfe && magic[1] == (byte) 0xed && magic[2] == (byte) 0xfa && magic[3] == (byte) 0xcf));
+            boolean valid =
+                    RuntimePlatform.current().os().equals("linux")
+                            ? magic.length >= 4
+                                    && magic[0] == 0x7f
+                                    && magic[1] == 'E'
+                                    && magic[2] == 'L'
+                                    && magic[3] == 'F'
+                            : magic.length >= 4
+                                    && ((magic[0] == (byte) 0xcf
+                                                    && magic[1] == (byte) 0xfa
+                                                    && magic[2] == (byte) 0xed
+                                                    && magic[3] == (byte) 0xfe)
+                                            || (magic[0] == (byte) 0xfe
+                                                    && magic[1] == (byte) 0xed
+                                                    && magic[2] == (byte) 0xfa
+                                                    && magic[3] == (byte) 0xcf));
             if (!valid) throw new IOException("归档中的采集器不是当前平台原生可执行程序");
         }
     }
@@ -210,9 +282,14 @@ public final class CollectorInstaller {
     private static void deleteTree(Path root) throws IOException {
         if (!Files.exists(root)) return;
         try (var paths = Files.walk(root)) {
-            paths.sorted(java.util.Comparator.reverseOrder()).forEach(path -> {
-                try { Files.deleteIfExists(path); } catch (IOException ignored) { }
-            });
+            paths.sorted(java.util.Comparator.reverseOrder())
+                    .forEach(
+                            path -> {
+                                try {
+                                    Files.deleteIfExists(path);
+                                } catch (IOException ignored) {
+                                }
+                            });
         }
     }
 

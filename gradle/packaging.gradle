@@ -13,6 +13,8 @@ if (versionParts[0] > 255 || versionParts[1] > 255 || versionParts[2] > 65535) {
     throw new GradleException('Windows 主/次版本不能超过255，修订版本不能超过65535')
 }
 version = analyzerVersion
+def nativeAppVersion = analyzerPlatform.os == 'macos'
+        ? analyzerMacBundleVersionFor(analyzerVersion) : analyzerVersion
 // 产品独立且永久固定，不能沿用 debugger 的 UpgradeCode，否则两个应用会互相卸载。
 def analyzerUpgradeUuid = '79e567ca-23e9-4b20-a323-796305209e9b'
 def generatedResources = layout.buildDirectory.dir('generated-resources')
@@ -49,7 +51,9 @@ def nativeNode = providers.gradleProperty('analyzerNodeExecutable').map { file(i
     found
 })
 def nativeCollector = providers.gradleProperty('analyzerMitmdumpExecutable').map { file(it) }
-        .orElse(provider { file("data/mitmproxy/mitmdump${analyzerPlatform.executableSuffix}") })
+        .orElse(provider { file(analyzerPlatform.os == 'macos'
+                ? 'data/mitmproxy/mitmproxy.app/Contents/MacOS/mitmdump'
+                : "data/mitmproxy/mitmdump${analyzerPlatform.executableSuffix}") })
 // 源码或打包缺少默认采集器时自动准备，复用运行时的固定版本、摘要及解压实现。
 tasks.register('prepareCollector', JavaExec) {
     group = 'distribution'
@@ -64,6 +68,8 @@ tasks.register('prepareCollector', JavaExec) {
 tasks.register('stageNativeTools') {
     dependsOn 'prepareCollector'
     inputs.files(nativeNode, nativeCollector)
+    inputs.files(provider { analyzerPlatform.os == 'macos'
+            ? fileTree(nativeCollector.get().parentFile.parentFile.parentFile) : [] })
     inputs.property('nativePlatform', analyzerPlatform.id)
     inputs.files(provider { ['analyzerNodeLicense', 'analyzerMitmproxyLicense'].findAll { project.hasProperty(it) }.collect { file(project.property(it)) } })
     outputs.dir(layout.buildDirectory.dir('native-tools'))
@@ -100,10 +106,22 @@ tasks.register('stageNativeTools') {
         def mitmVersion = versionMatch.group(1)
         def target = layout.buildDirectory.dir('native-tools').get().asFile
         copy { from node; into target; rename { "node${analyzerPlatform.executableSuffix}" } }
-        copy { from collector; into target; rename { "mitmdump${analyzerPlatform.executableSuffix}" } }
+        if (analyzerPlatform.os != 'macos') {
+            copy { from collector; into target; rename { "mitmdump${analyzerPlatform.executableSuffix}" } }
+        }
         if (analyzerPlatform.os != 'windows') {
             new File(target, 'node').setExecutable(true, false)
-            new File(target, 'mitmdump').setExecutable(true, false)
+            if (analyzerPlatform.os != 'macos') { new File(target, 'mitmdump').setExecutable(true, false) }
+        }
+        // macOS 官方分发是完整 .app，Python 框架和资源互相链接，不能拆成单个启动器。
+        if (analyzerPlatform.os == 'macos') {
+            def bundle = collector.parentFile.parentFile.parentFile
+            if (bundle.name != 'mitmproxy.app' || !new File(bundle, 'Contents/Frameworks').isDirectory()
+                    || !new File(bundle, 'Contents/Resources').isDirectory()) {
+                throw new GradleException('macOS 采集器须来自完整官方 mitmproxy.app/Contents/MacOS/mitmdump')
+            }
+            delete(new File(target, 'mitmproxy.app'))
+            project.exec { commandLine 'ditto', bundle.absolutePath, new File(target, 'mitmproxy.app').absolutePath }
         }
         // 许可证按真实工具版本缓存；显式文件用于离线构建，不在网络抖动时替换为别的版本。
         def licenses = new File(target, 'licenses')
@@ -163,6 +181,7 @@ tasks.register('stageDependencyLicenses') {
 }
 tasks.register('stageDistribution', Sync) {
     dependsOn 'jar', 'webBuild', 'stageDependencyLicenses', 'stageNativeTools'
+    inputs.files(provider { fileTree(layout.buildDirectory.dir('native-tools/mitmproxy.app').get().asFile) })
     into layout.buildDirectory.dir('distribution-input')
     from(tasks.named('jar'))
     from(configurations.runtimeClasspath) { into 'lib' }
@@ -172,8 +191,17 @@ tasks.register('stageDistribution', Sync) {
     from('tools') { include 'extract-catalog.mjs', 'mitmproxy_collector.py', 'WindowsSystemProxy.ps1', 'WindowsSystemProxy.cs'; into 'tools' }
     from('config') { include 'analyzer.json'; into 'config' }
     from('README.md')
-    from(layout.buildDirectory.dir('native-tools')) { into 'runtime-tools' }
+    from(layout.buildDirectory.dir('native-tools')) { exclude 'mitmproxy.app/**'; into 'runtime-tools' }
     from(layout.buildDirectory.dir('dependency-licenses')) { into 'licenses' }
+    doLast {
+        if (analyzerPlatform.os == 'macos') {
+            // Gradle 普通 Copy 会跟随符号链接；运行库单独使用本机 ditto 保持官方目录结构。
+            project.exec {
+                commandLine 'ditto', layout.buildDirectory.dir('native-tools/mitmproxy.app').get().asFile.absolutePath,
+                        layout.buildDirectory.dir('distribution-input/runtime-tools/mitmproxy.app').get().asFile.absolutePath
+            }
+        }
+    }
 }
 tasks.register('verifyDistribution') {
     dependsOn 'stageDistribution'
@@ -182,12 +210,16 @@ tasks.register('verifyDistribution') {
         ['protolens.jar', 'web/index.html', 'web/package.json', 'web/node_modules/acorn/dist/acorn.js',
          'tools/extract-catalog.mjs', 'tools/mitmproxy_collector.py', 'config/analyzer.json',
          "runtime-tools/node${analyzerPlatform.executableSuffix}",
-         "runtime-tools/mitmdump${analyzerPlatform.executableSuffix}",
+         analyzerPlatform.os == 'macos' ? 'runtime-tools/mitmproxy.app/Contents/MacOS/mitmdump'
+                 : "runtime-tools/mitmdump${analyzerPlatform.executableSuffix}",
          'runtime-tools/licenses/node-LICENSE.txt', 'runtime-tools/licenses/mitmproxy-LICENSE.txt'].each { name ->
             if (!new File(target, name).isFile()) { throw new GradleException("分发缺少文件：${name}") }
         }
         def forbidden = fileTree(target) {
             include '**/*.pem', '**/*.p12', '**/*.key', '**/*.saz', '**/catalog.json', '**/settings.json', '**/mcp-token*', '**/instance.json'
+            // 官方 Python 运行库的公开根证书集合不是本机生成的代理证书或私钥。
+            exclude 'runtime-tools/mitmproxy.app/Contents/Resources/certifi/cacert.pem',
+                    'runtime-tools/mitmproxy.app/Contents/Frameworks/certifi/cacert.pem'
         }.files
         if (!forbidden.isEmpty() || new File(target, 'data').exists()) {
             throw new GradleException('分发意外包含本机数据，拒绝打包')
@@ -196,6 +228,17 @@ tasks.register('verifyDistribution') {
             throw new GradleException('独立工作台混入游戏基础设施依赖')
         }
     }
+}
+
+// jpackage 会逐个重签输入目录中的可执行文件，无法处理第三方应用的脚本启动入口。
+// 先生成仅含主应用的镜像，再原样嵌入已验证的官方采集器应用，保留其完整签名和链接结构。
+tasks.register('stageMacPackageInput', Sync) {
+    dependsOn 'verifyDistribution'
+    onlyIf { analyzerPlatform.os == 'macos' }
+    from(layout.buildDirectory.dir('distribution-input')) {
+        exclude 'runtime-tools/mitmproxy.app/**'
+    }
+    into layout.buildDirectory.dir('macos-package-input')
 }
 
 // 可指定独立输出目录，以便构建新版本时不覆盖仍在运行的便携版。
@@ -207,6 +250,20 @@ def analyzerImage = new File(analyzerImageRoot, analyzerPlatform.imageName)
 def jpackageExecutable = new File(System.getProperty('java.home'), "bin/jpackage${analyzerPlatform.executableSuffix}")
 def installerType = providers.gradleProperty('analyzerInstallerType').getOrElse(analyzerPlatform.installers.first())
 def installerStaging = new File(analyzerReleaseRoot, '.installer-staging')
+
+// 在 jpackage 签名之前生成模板；Finder 展示对外版本，CFBundleVersion 使用合法的原生构建版本。
+tasks.register('prepareMacResources') {
+    inputs.file('tools/macos/Info.plist')
+    inputs.property('analyzerVersion', analyzerVersion)
+    outputs.dir(layout.buildDirectory.dir('macos-resources'))
+    onlyIf { analyzerPlatform.os == 'macos' }
+    doLast {
+        def template = file('tools/macos/Info.plist').getText('UTF-8')
+        def output = layout.buildDirectory.file('macos-resources/Info.plist').get().asFile
+        output.parentFile.mkdirs()
+        output.setText(template.replace('@ANALYZER_VERSION@', analyzerVersion), 'UTF-8')
+    }
+}
 
 // 发布到单个平台目录，其他平台的最新包不受影响；Windows保留原取包地址兼容已有分发流程。
 def publishInstaller = { File source, File directory ->
@@ -251,6 +308,8 @@ tasks.register('verifyPackagingPlatform') {
 }
 
 tasks.register('packageAppImage', Exec) {
+    dependsOn 'prepareMacResources'
+    dependsOn 'stageMacPackageInput'
     dependsOn 'verifyPackagingPlatform'
     dependsOn 'checkPackagingPlatforms'
     dependsOn 'updateDesktopIcons'
@@ -271,16 +330,29 @@ tasks.register('packageAppImage', Exec) {
     }
     executable jpackageExecutable
     args '--type', 'app-image', '--name', 'ProtoLens',
-            '--input', layout.buildDirectory.dir('distribution-input').get().asFile.absolutePath,
+            '--input', layout.buildDirectory.dir(analyzerPlatform.os == 'macos'
+                    ? 'macos-package-input' : 'distribution-input').get().asFile.absolutePath,
             '--dest', analyzerStagingRoot.absolutePath,
-            '--main-jar', 'protolens.jar', '--app-version', analyzerVersion,
+            '--main-jar', 'protolens.jar', '--app-version', nativeAppVersion,
             '--icon', file("${layout.buildDirectory.get().asFile}/generated-resources/desktop/${analyzerPlatform.icon}").absolutePath,
+            '--java-options', '-Dfile.encoding=UTF-8',
             '--vendor', 'Stupidbird', '--add-modules', 'java.se,jdk.unsupported,jdk.crypto.ec,jdk.zipfs'
     if (analyzerPlatform.os == 'macos') {
-        args '--mac-package-identifier', 'com.lashouwan.protolens'
+        args '--mac-package-identifier', 'com.lashouwan.protolens',
+                '--resource-dir', layout.buildDirectory.dir('macos-resources').get().asFile.absolutePath
     }
     doLast {
         def staged = new File(analyzerStagingRoot, analyzerPlatform.imageName)
+        if (analyzerPlatform.os == 'macos') {
+            project.exec {
+                commandLine 'ditto', layout.buildDirectory.dir('distribution-input/runtime-tools/mitmproxy.app').get().asFile.absolutePath,
+                        new File(staged, 'Contents/app/runtime-tools/mitmproxy.app').absolutePath
+            }
+            // 只重新封装本产品，不 deep 重签采集器，避免破坏其脚本入口和原生依赖的签名。
+            // 这是本机 ad-hoc 签名，并非 Apple Developer ID 签名或公证。
+            project.exec { commandLine 'codesign', '--force', '--sign', '-', staged.absolutePath }
+            project.exec { commandLine 'codesign', '--verify', staged.absolutePath }
+        }
         if (!new File(staged, analyzerPlatform.launcher).isFile()) {
             throw new GradleException('新镜像缺少平台启动程序，保留原镜像')
         }
@@ -369,7 +441,7 @@ tasks.register('packageInstaller', Exec) {
     args '--type', installerType, '--name', 'ProtoLens',
             '--app-image', analyzerImage.absolutePath,
             '--dest', installerStaging.absolutePath,
-            '--app-version', analyzerVersion, '--vendor', 'Stupidbird',
+            '--app-version', nativeAppVersion, '--vendor', 'Stupidbird',
             '--icon', file("${layout.buildDirectory.get().asFile}/generated-resources/desktop/${analyzerPlatform.icon}").absolutePath
     if (analyzerPlatform.os == 'windows') {
         args '--win-upgrade-uuid', analyzerUpgradeUuid,

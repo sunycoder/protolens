@@ -18,6 +18,12 @@ ext.analyzerPlatformFor = { String osName, String architecture ->
 }
 ext.analyzerPlatform = analyzerPlatformFor(System.getProperty('os.name'), System.getProperty('os.arch'))
 
+// jpackage 的 macOS 构建版本首段必须为正数；对外版本仍允许 0.x，递增主段保持升级顺序。
+ext.analyzerMacBundleVersionFor = { String version ->
+    def parts = version.split('\\.').collect { it.toInteger() }
+    "${parts[0] + 1}.${parts[1]}.${parts[2]}".toString()
+}
+
 tasks.register('printPackagingPlatform') {
     group = 'distribution'
     description = 'Print the native packaging platform and accepted installer types.'
@@ -41,6 +47,9 @@ tasks.register('checkPackagingPlatforms') {
             assert selected.id == row[2]
             assert selected.launcher == row[3]
         }
+        assert analyzerMacBundleVersionFor('0.1.5') == '1.1.5'
+        assert analyzerMacBundleVersionFor('1.0.0') == '2.0.0'
+        assert analyzerMacBundleVersionFor('255.255.65535') == '256.255.65535'
         [['Windows 11', 'aarch64'], ['Linux', 'riscv64'], ['FreeBSD', 'amd64']].each { row ->
             boolean rejected = false
             try { analyzerPlatformFor(row[0], row[1]) }

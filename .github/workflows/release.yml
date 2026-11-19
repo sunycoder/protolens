@@ -2,7 +2,7 @@ name: 发布 ProtoLens
 
 on:
   push:
-    tags: ['v*']
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -20,15 +20,15 @@ jobs:
         include:
           - os: windows-latest
             platform: windows-x64
-            installer: exe
             tasks: packageInstaller packagePortable
-          - os: macos-latest
-            platform: macos
-            installer: tar.gz
-            tasks: packagePortable
+          - os: macos-15
+            platform: macos-arm64
+            tasks: packageInstaller packagePortable
+          - os: macos-15-intel
+            platform: macos-x64
+            tasks: packageInstaller packagePortable
           - os: ubuntu-latest
             platform: linux-x64
-            installer: tar.gz
             tasks: packagePortable
     runs-on: ${{ matrix.os }}
     steps:
@@ -36,13 +36,13 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.14.5'
+          gradle-version: "8.14.5"
       - uses: actions/setup-node@v4
         with:
-          node-version: '22.12'
+          node-version: "22.12"
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: 核对发布版本
@@ -54,55 +54,34 @@ jobs:
             exit 1
           fi
           echo "APP_VERSION=$app_version" >> "$GITHUB_ENV"
-      - name: 准备 macOS 采集器
-        if: matrix.platform == 'macos'
-        shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/protolens-mitm"
-          if [ "$(uname -m)" = "arm64" ]; then
-            url=https://downloads.mitmproxy.org/12.3.1/mitmproxy-12.3.1-macos-arm64.tar.gz
-            sha=9b7f7a8e3fd1b1544089c937c579ef1f0f503f0ea598c25bda9eab077c735b93
-          else
-            url=https://downloads.mitmproxy.org/12.3.1/mitmproxy-12.3.1-macos-x86_64.tar.gz
-            sha=f4cf5e563e7068af297a27be97686f58917760d3c0dcc6a997ca83f6f5ffb3db
-          fi
-          curl -fsSL "$url" -o "$RUNNER_TEMP/mitmproxy.tar.gz"
-          echo "$sha  $RUNNER_TEMP/mitmproxy.tar.gz" | shasum -a 256 -c -
-          tar -xzf "$RUNNER_TEMP/mitmproxy.tar.gz" -C "$RUNNER_TEMP/protolens-mitm"
-          echo "MITMDUMP_PATH=$(find "$RUNNER_TEMP/protolens-mitm" -type f -name mitmdump | head -1)" >> "$GITHUB_ENV"
       - name: 构建安装包和便携包
-        if: matrix.platform != 'macos'
         run: gradle ${{ matrix.tasks }}
-      - name: 构建 macOS 便携包
-        if: matrix.platform == 'macos'
+      - name: 验收 macOS 原生应用和 DMG
+        if: runner.os == 'macOS'
         shell: bash
         run: |
-          gradle stageDistribution "-PanalyzerMitmdumpExecutable=$MITMDUMP_PATH"
-          rm -rf build/macos-portable build/distributions
-          mkdir -p build/macos-portable/ProtoLens build/distributions
-          cp -R build/distribution-input/. build/macos-portable/ProtoLens/
-          cat > build/macos-portable/ProtoLens/ProtoLens <<'EOF'
-          #!/bin/sh
-          set -e
-          cd "$(dirname "$0")"
-          exec java -jar protolens.jar "$@"
-          EOF
-          chmod +x build/macos-portable/ProtoLens/ProtoLens
-          tar -czf "build/distributions/ProtoLens-${APP_VERSION}-macos.tar.gz" -C build/macos-portable ProtoLens
+          node tools/verify-macos-package.mjs "build/installer/ProtoLens-${APP_VERSION}-${{ matrix.platform }}.dmg" "${{ matrix.platform }}"
+      - name: 整理架构独立的发布产物
+        shell: bash
+        run: |
+          mkdir -p build/release-assets
+          if [ "${{ matrix.platform }}" = windows-x64 ]; then
+            cp release/ProtoLens-latest.exe build/release-assets/
+          elif [ "${{ runner.os }}" = macOS ]; then
+            cp "build/installer/ProtoLens-${APP_VERSION}-${{ matrix.platform }}.dmg" build/release-assets/
+          fi
+          cp build/distributions/ProtoLens-${APP_VERSION}-${{ matrix.platform }}.* build/release-assets/
       - name: 上传发布产物
         uses: actions/upload-artifact@v4
         with:
           name: protolens-${{ matrix.platform }}
           if-no-files-found: error
           retention-days: 7
-          path: |
-            release/${{ matrix.platform }}/ProtoLens-latest.${{ matrix.installer }}
-            release/ProtoLens-latest.exe
-            build/distributions/ProtoLens-*.zip
-            build/distributions/ProtoLens-*.tar.gz
+          path: build/release-assets/*
 
   publish:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -118,6 +97,13 @@ jobs:
           pattern: protolens-*
           path: release
           merge-multiple: true
+      - name: 核对两个 macOS 架构的安装包
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for arch in arm64 x64; do
+            test -s "release/ProtoLens-${version}-macos-${arch}.dmg"
+          done
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true

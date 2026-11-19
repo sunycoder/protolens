@@ -6,8 +6,10 @@ import com.lashouwan.protolens.capture.LiveCaptureService;
 import com.lashouwan.protolens.config.AnalyzerLaunchOptions;
 import com.lashouwan.protolens.config.AnalyzerSettingsStore;
 import com.lashouwan.protolens.config.CollectorConfigStore;
-import com.lashouwan.protolens.desktop.CollectorProcess;
 import com.lashouwan.protolens.desktop.AnalyzerVersion;
+import com.lashouwan.protolens.desktop.CollectorProcess;
+import com.lashouwan.protolens.desktop.ReleaseAssets;
+import com.lashouwan.protolens.desktop.RuntimePlatform;
 import com.lashouwan.protolens.protocol.ProtocolCatalog;
 import com.lashouwan.protolens.protocol.ProtocolCatalogService;
 
@@ -18,7 +20,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
-import java.util.Locale;
 
 /** 服务健康、实际启动地址及页面偏好接口；配置源和生效值一起展示，端口不由页面偏好覆盖。 */
 public final class SystemController {
@@ -69,8 +70,7 @@ public final class SystemController {
                                                         .set("catalog", catalog.summary(mapper))));
         router.get("/api/settings")
                 .handler(context -> http.worker(context, this::settingsSnapshot));
-        router.get("/api/update")
-                .handler(context -> http.worker(context, this::updateSnapshot));
+        router.get("/api/update").handler(context -> http.worker(context, this::updateSnapshot));
         router.get("/api/collector")
                 .handler(
                         context ->
@@ -105,33 +105,37 @@ public final class SystemController {
 
     /** 读取公开 GitHub Release 元数据，按当前系统筛选安装包。 */
     private ObjectNode updateSnapshot() throws Exception {
-        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
-        String platform = os.contains("win") ? "windows" : os.contains("mac") ? "macos" : "linux";
-        String rawArch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
-        String arch = rawArch.contains("aarch64") || rawArch.contains("arm64") ? "arm64" : "x64";
-        HttpRequest request = HttpRequest.newBuilder(URI.create("https://api.github.com/repos/sunycoder/protolens/releases/latest"))
-                .timeout(Duration.ofSeconds(15)).header("Accept", "application/vnd.github+json")
-                .header("User-Agent", "ProtoLens").GET().build();
-        var response = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()
-                .send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() / 100 != 2) throw new IllegalStateException("GitHub 更新查询失败：HTTP " + response.statusCode());
+        RuntimePlatform platform = RuntimePlatform.current();
+        HttpRequest request =
+                HttpRequest.newBuilder(
+                                URI.create(
+                                        "https://api.github.com/repos/sunycoder/protolens/releases/latest"))
+                        .timeout(Duration.ofSeconds(15))
+                        .header("Accept", "application/vnd.github+json")
+                        .header("User-Agent", "ProtoLens")
+                        .GET()
+                        .build();
+        var response =
+                HttpClient.newBuilder()
+                        .connectTimeout(Duration.ofSeconds(10))
+                        .build()
+                        .send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() / 100 != 2)
+            throw new IllegalStateException("GitHub 更新查询失败：HTTP " + response.statusCode());
         var release = mapper.readTree(response.body());
         String tag = release.path("tag_name").asText("");
         String version = tag.startsWith("v") ? tag.substring(1) : tag;
-        var result = mapper.createObjectNode().put("currentVersion", AnalyzerVersion.current())
-                .put("latestVersion", version).put("platform", platform).put("arch", arch)
-                .put("releaseUrl", release.path("html_url").asText(""));
-        for (var asset : release.path("assets")) {
-            String name = asset.path("name").asText("");
-            String lower = name.toLowerCase(Locale.ROOT);
-            boolean platformMatch = lower.contains(platform + "-" + arch)
-                    || (platform.equals("windows") && lower.equals("protolens-latest.exe"));
-            if (platformMatch && (lower.endsWith(".exe") || lower.endsWith(".dmg") || lower.endsWith(".deb")
-                    || lower.endsWith(".rpm") || lower.endsWith(".zip") || lower.endsWith(".tar.gz"))) {
-                result.put("downloadUrl", asset.path("browser_download_url").asText(""))
-                        .put("fileName", name);
-                break;
-            }
+        var result =
+                mapper.createObjectNode()
+                        .put("currentVersion", AnalyzerVersion.current())
+                        .put("latestVersion", version)
+                        .put("platform", platform.os())
+                        .put("arch", platform.architecture())
+                        .put("releaseUrl", release.path("html_url").asText(""));
+        var asset = ReleaseAssets.select(release.path("assets"), platform);
+        if (asset != null) {
+            result.put("downloadUrl", asset.path("browser_download_url").asText(""))
+                    .put("fileName", asset.path("name").asText(""));
         }
         result.put("available", isNewer(version, AnalyzerVersion.current()));
         return result;

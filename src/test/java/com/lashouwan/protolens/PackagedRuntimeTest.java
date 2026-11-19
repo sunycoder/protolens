@@ -57,9 +57,15 @@ class PackagedRuntimeTest {
         Path bundled = Files.createDirectories(image.resolve("runtime-tools"));
         String suffix = RuntimePlatform.current().executableSuffix();
         Files.createFile(bundled.resolve("node" + suffix));
-        Files.createFile(bundled.resolve("mitmdump" + suffix));
+        Path collector =
+                bundled.resolve(
+                        RuntimePlatform.current().os().equals("macos")
+                                ? "mitmproxy.app/Contents/MacOS/mitmdump"
+                                : "mitmdump" + suffix);
+        Files.createDirectories(collector.getParent());
+        Files.createFile(collector);
         assertEquals(bundled.resolve("node" + suffix).toString(), RuntimeTools.node(edited));
-        assertEquals(bundled.resolve("mitmdump" + suffix), RuntimeTools.collector(edited));
+        assertEquals(collector, RuntimeTools.collector(edited));
     }
 
     @Test

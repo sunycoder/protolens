@@ -19,14 +19,19 @@
 | 系统 | 安装包 | 便携版 |
 | --- | --- | --- |
 | Windows x64 | [下载 ProtoLens-latest.exe](https://github.com/sunycoder/protolens/releases/download/v0.1.5/ProtoLens-latest.exe) | [下载 Windows ZIP](https://github.com/sunycoder/protolens/releases/download/v0.1.5/ProtoLens-0.1.5-windows-x64.zip) |
-| macOS | [下载 macOS tar.gz](https://github.com/sunycoder/protolens/releases/download/v0.1.5/ProtoLens-0.1.5-macos.tar.gz) | 同一文件 |
+| macOS Apple Silicon | 新增 `macos-arm64.dmg` 构建，发布后从 Releases 下载 | 同架构 `.app` 的 tar.gz |
+| macOS Intel | 新增 `macos-x64.dmg` 构建，发布后从 Releases 下载 | 同架构 `.app` 的 tar.gz |
 | Linux x64 | [下载 Linux tar.gz](https://github.com/sunycoder/protolens/releases/download/v0.1.5/ProtoLens-0.1.5-linux-x64.tar.gz) | 同一文件 |
 
-当前发布版本：`v0.1.5`。
+当前发布版本：`v0.1.5`。上表 macOS DMG 为本次新增流程的产物，尚未发布；旧版 macOS tar.gz 仍是需要 Java 21 的命令行启动包，不要与新的原生应用包混用。
 
 **Windows 安装版**：运行下载的 `ProtoLens-latest.exe`，安装后打开快捷方式；便携版解压整个 ZIP 后运行 `ProtoLens/ProtoLens.exe`，无需另装 Java、Node 或采集器。
 
-**macOS 便携版**：当前发布的是命令行启动包，需先安装 Java 21。解压整个 tar.gz，在终端进入解压后的 `ProtoLens` 目录执行 `sh ./ProtoLens`；Node 和采集器随包提供。原生工具须匹配本机 Apple Silicon / Intel 架构，不能直接混用其他架构或系统的包。
+**macOS DMG 安装版（新流程）**：在“关于本机”确认芯片：Apple M 系列选择 `macos-arm64.dmg`，Intel 选择 `macos-x64.dmg`。双击 DMG，将 `ProtoLens.app` 拖入 `Applications`，弹出磁盘映像，再从“应用程序”双击 ProtoLens。应用会启动本机服务并自动打开浏览器中的工作台，不需要安装 Java、Node、Python 或在终端执行命令。实时采集仍需按下文信任证书并配置代理。
+
+**macOS 便携版（新流程）**：解压对应架构的 tar.gz，双击完整的 `ProtoLens.app`；运行环境同样内置，不要将启动程序单独移出 `.app`。
+
+**首次打开与系统安全提示**：当前流程没有配置 Apple Developer ID 签名和公证。下载后的应用可能被 macOS 拦截；确认来自本仓库后，在“系统设置 → 隐私与安全性”使用系统提供的“仍要打开”入口（系统版本不同，名称可能略有差异），不需要关闭系统安全检查或执行终端命令。内置 Java 与 Apple 签名、公证是两件事，CI 启动检查不能证明已通过 Gatekeeper 公证。
 
 **Linux 便携版**：解压整个 tar.gz，在解压目录执行 `./ProtoLens/bin/ProtoLens`。桌面打开和托盘功能取决于桌面环境，无桌面时查看日志给出的本机页面地址。
 
@@ -175,7 +180,7 @@ macOS / Linux 使用 `sh` 运行脚本，不依赖下载或拷贝后是否保留
 
 ### 打包参数与产物
 
-构建需 JDK 21、Node/npm；缺少默认 mitmdump 时会自动准备；Windows 安装器另需 **WiX 3**，便携版无需 WiX。Node 默认从 PATH 查找，mitmdump 在 Windows 默认取 `data/mitmproxy/mitmdump.exe`，在 macOS / Linux 默认取 `data/mitmproxy/mitmdump`。工具不在默认位置时：
+构建需 JDK 21、Node/npm；缺少默认采集器时会自动准备；Windows 安装器另需 **WiX 3**，便携版无需 WiX。Node 默认从 PATH 查找；采集器在 Windows 默认取 `data/mitmproxy/mitmdump.exe`，Linux 取 `data/mitmproxy/mitmdump`，macOS 取 `data/mitmproxy/mitmproxy.app/Contents/MacOS/mitmdump`。macOS 必须保留官方完整 `.app` 中的 Python 框架、资源与符号链接，不能只复制单个 mitmdump；显式设置 `analyzerMitmdumpExecutable` 时也应指向完整应用内部的该路径。工具不在默认位置时：
 
 ```powershell
 .\gradlew.bat packageInstaller `
@@ -193,13 +198,23 @@ sh ./gradlew packagePortable \
   "-PanalyzerMitmdumpExecutable=/实际路径/mitmdump"
 ```
 
-Windows 原生安装器需要 WiX 3；macOS / Linux 安装器依赖各自系统的打包工具。当前 macOS 发布流程使用 `stageDistribution` 生成上述 Java 21 启动包，与本机 `packagePortable` 生成的原生 `.app` 镜像不是同一形态。
+Windows 原生安装器需要 WiX 3；macOS DMG 使用系统 `hdiutil` 和 Xcode Command Line Tools 的 `xcrun`。macOS 发布流程在 Apple Silicon、Intel 构建机分别执行 `packageInstaller packagePortable`，通过 jpackage 内置 Java 21，并携带同架构 Node 和独立采集器。源码 Gradle Wrapper 与 CI 均使用 Gradle 8.14.5。
+
+macOS 的 jpackage 不接受首段为 0 的构建版本，因此内部 `CFBundleVersion` 将对外版本主段加 1（例如 `0.1.5 → 1.1.5`，`1.0.0 → 2.0.0`），保持升级顺序；自定义 Info.plist 在签名前保留原始 `CFBundleShortVersionString`。Finder、应用界面、DMG 文件名和 Release 标签仍使用对外版本，安装验收同时核对两种版本。
+
+macOS 本机构建后可运行 `node tools/verify-macos-package.mjs build/installer/ProtoLens-<版本>-macos-<架构>.dmg macos-<架构>` 验收，架构取 `arm64` 或 `x64`。脚本挂载 DMG，将应用复制到包含空格、中文的独立目录，检查 CPU 与内置运行时，分别通过原生启动器和 Finder 使用的 Launch Services 启动，验证静态页面、用户数据目录和采集器；测试使用独立配置，不接管系统代理。`.github/workflows/macos-package.yml` 可手动运行，相关 PR / 主分支改动也会触发两种架构验收，成功后保留安装包供下载。
+
+发布工作流在两个架构均通过以上验收后才上传 GitHub Release；手动执行 `release.yml` 仅构建、验收并保存 Actions 产物，推送与应用版本一致的 `v<版本>` 标签才发布。macOS 使用包含版本和架构的独立文件名，更新检查优先推荐同架构 DMG，避免被压缩包或另一架构抢占。
 
 | 产物 | 模块内路径 |
 | --- | --- |
 | 最新 Windows 安装包 | `release/ProtoLens-latest.exe` |
 | Windows 便携 ZIP | `build/distributions/ProtoLens-<版本>-windows-x64.zip` |
-| 完整运行目录 | `build/app-image/ProtoLens/` |
+| macOS Apple Silicon DMG | `build/installer/ProtoLens-<版本>-macos-arm64.dmg` |
+| macOS Intel DMG | `build/installer/ProtoLens-<版本>-macos-x64.dmg` |
+| macOS 原生便携包 | `build/distributions/ProtoLens-<版本>-macos-<架构>.tar.gz` |
+| macOS 完整应用 | `build/app-image/ProtoLens.app/` |
+| Windows / Linux 完整运行目录 | `build/app-image/ProtoLens/` |
 
 WiX 已在 PATH 时可省略 `analyzerWixDir`；版本默认取 `src/main/resources/analyzer-version.properties`。离线打包可传 `-PanalyzerNodeLicense=<对应版本LICENSE>`、`-PanalyzerMitmproxyLicense=<对应版本LICENSE>`。安装包不包含本机抓包、字典或证书；覆盖升级前先从托盘退出。平台实机验收与 CI 构建检查应分开记录；在 Windows 做脚本合同检查不能替代 macOS / Linux 实机启动。
 
