@@ -91,6 +91,10 @@ public final class CaptureStore {
         int index = 0;
         for (JsonNode node : capture.withArray("messages")) {
             ((ObjectNode) node).put("index", index++);
+            ObjectNode identity =
+                    ConnectionIdentity.observe(node, capture.path("dictionary"), mapper);
+            if (identity != null)
+                updateIdentity(capture, identity, node.path("connection").asText());
         }
         synchronized (this) {
             save(capture);
@@ -111,7 +115,8 @@ public final class CaptureStore {
                     String id = path.getFileName().toString().replace(".json", "");
                     if (liveCaptures.containsKey(id)) {
                         continue;
-                    } else if (Files.exists(directory.resolve(id + ".journal"))) {
+                    } else if (Files.exists(directory.resolve(id + ".journal"))
+                            || Files.exists(directory.resolve(id + ".connections"))) {
                         captures.add(summary(load(id)));
                     } else if (Files.isRegularFile(metadata)) {
                         ObjectNode meta = (ObjectNode) mapper.readTree(metadata.toFile());
@@ -327,7 +332,20 @@ public final class CaptureStore {
                     count++;
                 }
             }
-            ((ObjectNode) connection).put("messages", count);
+            ObjectNode frozenConnection = (ObjectNode) connection;
+            JsonNode identity = identityAt(connection, to);
+            JsonNode latest = connection.path("identity");
+            if (identity == null ? !latest.isMissingNode() : !identity.equals(latest)) {
+                frozenConnection.put("note", "");
+            }
+            if (identity == null) frozenConnection.remove("identity");
+            else frozenConnection.set("identity", identity.deepCopy());
+            ArrayNode history = mapper.createArrayNode();
+            for (JsonNode event : connection.path("identityHistory")) {
+                if (event.path("sourceIndex").asInt() <= to) history.add(event.deepCopy());
+            }
+            frozenConnection.set("identityHistory", history);
+            frozenConnection.put("messages", count);
         }
         return frozen;
     }
@@ -365,6 +383,12 @@ public final class CaptureStore {
                         int index = message.path("index").asInt(-1);
                         if (index == expected) {
                             messages.add(message);
+                            ObjectNode identity =
+                                    ConnectionIdentity.observe(
+                                            message, restored.path("dictionary"), mapper);
+                            if (identity != null)
+                                updateIdentity(
+                                        restored, identity, message.path("connection").asText());
                         } else if (index > expected || index < 0) {
                             restored.put("recoveryWarning", "实时日志编号中断，已保留前序完整消息");
                             break;
@@ -388,6 +412,18 @@ public final class CaptureStore {
                             .path("index")
                             .asInt();
             restored.put("diskLastIndex", last).put("totalReceived", last + 1);
+        }
+        Path annotations = directory.resolve(id + ".connections");
+        if (Files.isRegularFile(annotations)) {
+            JsonNode savedConnections = mapper.readTree(annotations.toFile());
+            for (JsonNode connection : restored.withArray("connections")) {
+                for (JsonNode saved : savedConnections) {
+                    // 只在备注对应的身份证据仍相同时恢复，后续登录不得继承旧账号备注。
+                    if (connection.path("id").equals(saved.path("id"))
+                            && connection.path("identity").equals(saved.path("identity")))
+                        ((ObjectNode) connection).put("note", saved.path("note").asText());
+                }
+            }
         }
         restored.setAll(summary(restored, false));
         return restored;
@@ -472,6 +508,11 @@ public final class CaptureStore {
         }
         LiveMessageBuffer buffer = liveBuffers.get(id);
         ObjectNode appended = buffer.append(message, mapper);
+        ObjectNode identity =
+                ConnectionIdentity.observe(appended, capture.path("dictionary"), mapper);
+        if (identity != null) {
+            updateIdentity(capture, identity, appended.path("connection").asText());
+        }
         if (capture.path("continuous").asBoolean()) {
             try {
                 // 一行一个原编号消息，不重复重写整份抓包；关闭文件后再报告该编号已写入。
@@ -497,6 +538,140 @@ public final class CaptureStore {
         for (JsonNode mark : capture.withArray("marks")) {
             ((ObjectNode) mark).put("expired", mark.path("from").asInt() < first);
         }
+    }
+
+    /** 身份分段从确认消息开始生效，不能把新身份倒灌到前面的消息；重复推送不新增分段。 */
+    private void updateIdentity(ObjectNode capture, ObjectNode identity, String connectionId) {
+        ObjectNode connection = null;
+        for (JsonNode candidate : capture.withArray("connections")) {
+            if (candidate.path("id").asText().equals(connectionId)) {
+                connection = (ObjectNode) candidate;
+            }
+        }
+        if (connection == null) {
+            return;
+        }
+        JsonNode previous = connection.path("identity");
+        if (identity.equals(previous)) {
+            return;
+        }
+        ObjectNode currentValue = identity.deepCopy();
+        currentValue.remove(List.of("sourceIndex", "sourceProtocol"));
+        ObjectNode previousValue =
+                previous.isObject()
+                        ? ((ObjectNode) previous).deepCopy()
+                        : mapper.createObjectNode();
+        previousValue.remove(List.of("sourceIndex", "sourceProtocol"));
+        if (currentValue.equals(previousValue)
+                && !"pending".equals(identity.path("state").asText())) {
+            return;
+        }
+        // 登录或角色变更时解除旧备注，避免旧账号的“主号”别名跟随新账号。
+        if ("pending".equals(identity.path("state").asText())
+                || (!previous.path("roleId").asText().isEmpty()
+                        && !previous.path("roleId")
+                                .asText()
+                                .equals(identity.path("roleId").asText()))) {
+            connection.put("note", "");
+        }
+        connection.set("identity", identity);
+        ArrayNode history = connection.withArray("identityHistory");
+        history.add(identity.deepCopy());
+        if (history.size() > 256) {
+            history.remove(0);
+            connection.put("identityHistoryTruncated", true);
+        }
+    }
+
+    /** 从当前仍保留消息重算遗漏身份，不重连游戏、不改变消息解码状态，不用更早的证据回滚最新身份。 */
+    public synchronized ObjectNode reidentifyConnections(String id) throws IOException {
+        ObjectNode source = load(id);
+        ObjectNode rebuilt = source.deepCopy();
+        for (JsonNode message : rebuilt.path("messages")) {
+            ObjectNode identity =
+                    ConnectionIdentity.observe(message, rebuilt.path("dictionary"), mapper);
+            if (identity == null) {
+                continue;
+            }
+            for (JsonNode connection : rebuilt.path("connections")) {
+                // 仅重新处理当前证据之后或同一位置的消息，不用淘汰窗口中的旧消息回滚新身份。
+                if (connection.path("id").equals(message.path("connection"))
+                        && identity.path("sourceIndex").asInt()
+                                >= connection.path("identity").path("sourceIndex").asInt(-1)) {
+                    updateIdentity(rebuilt, identity, message.path("connection").asText());
+                }
+            }
+        }
+        if (liveCaptures.containsKey(id)) {
+            // 只更新连接元信息，绝不用有界内存窗口覆盖磁盘消息。
+            source.set("connections", rebuilt.path("connections"));
+            return summary(source);
+        }
+        save(rebuilt);
+        Files.deleteIfExists(directory.resolve(id + ".journal"));
+        Files.deleteIfExists(directory.resolve(id + ".connections"));
+        return summary(rebuilt);
+    }
+
+    /** 手动备注只属于该条连接，不声明已识别账号；先写副本，保存失败不发布新状态。 */
+    public synchronized ObjectNode annotateConnection(String id, String connectionId, String note)
+            throws IOException {
+        return annotateConnection(id, connectionId, note, null);
+    }
+
+    /** 编辑期间可能发生账号切换；提供预期身份时，必须仍对应同一身份证据才允许保存备注。 */
+    public synchronized ObjectNode annotateConnection(
+            String id, String connectionId, String note, JsonNode expectedIdentity)
+            throws IOException {
+        if (note == null || note.length() > 40 || note.chars().anyMatch(Character::isISOControl)) {
+            throw new IllegalArgumentException("连接备注最多 40 字，不能包含换行或控制字符");
+        }
+        ObjectNode source = liveCaptures.containsKey(id) ? liveCaptures.get(id) : load(id);
+        ObjectNode copy = liveCaptures.containsKey(id) ? summary(source) : source.deepCopy();
+        ObjectNode target = null;
+        for (JsonNode connection : copy.withArray("connections")) {
+            if (connection.path("id").asText().equals(connectionId)) {
+                target = (ObjectNode) connection;
+            }
+        }
+        if (target == null) {
+            throw new IllegalArgumentException("记录中不存在此连接");
+        }
+        if (expectedIdentity != null
+                && (expectedIdentity.isNull()
+                        ? target.hasNonNull("identity")
+                        : !target.path("identity").equals(expectedIdentity))) {
+            throw new IllegalArgumentException("连接身份已变化，请重新读取并确认账号后再保存备注");
+        }
+        target.put("note", note.strip());
+        if (liveCaptures.containsKey(id)) {
+            // 持续落盘的备注单独原子保存，绝不拿内存窗口覆盖磁盘已有消息。
+            if (source.has("diskFirstIndex")) {
+                Path metadata = directory.resolve(id + ".connections");
+                Path temporary = Files.createTempFile(directory, "connections-", ".tmp");
+                try {
+                    mapper.writeValue(temporary.toFile(), copy.path("connections"));
+                    try {
+                        Files.move(
+                                temporary,
+                                metadata,
+                                StandardCopyOption.ATOMIC_MOVE,
+                                StandardCopyOption.REPLACE_EXISTING);
+                    } catch (AtomicMoveNotSupportedException unsupported) {
+                        Files.move(temporary, metadata, StandardCopyOption.REPLACE_EXISTING);
+                    }
+                } finally {
+                    Files.deleteIfExists(temporary);
+                }
+            }
+            source.set("connections", copy.path("connections"));
+        } else {
+            save(copy);
+            // 中断后的记录已完整物化；发布成功后移除旧日志与备注覆盖层，后续读取不回退到旧备注。
+            Files.deleteIfExists(directory.resolve(id + ".journal"));
+            Files.deleteIfExists(directory.resolve(id + ".connections"));
+        }
+        return summary(liveCaptures.containsKey(id) ? source : copy);
     }
 
     public synchronized void stopLive(String id, String state) {
@@ -554,6 +729,7 @@ public final class CaptureStore {
         }
         save(capture);
         Files.deleteIfExists(directory.resolve(id + ".journal"));
+        Files.deleteIfExists(directory.resolve(id + ".connections"));
         liveCaptures.remove(id);
         liveBuffers.remove(id);
         return summary(capture);
@@ -587,6 +763,7 @@ public final class CaptureStore {
         }
         Files.deleteIfExists(directory.resolve(id + ".json"));
         Files.deleteIfExists(directory.resolve(id + ".journal"));
+        Files.deleteIfExists(directory.resolve(id + ".connections"));
         Files.deleteIfExists(directory.resolve(id + ".meta"));
         liveCaptures.remove(id);
         liveBuffers.remove(id);
@@ -701,7 +878,27 @@ public final class CaptureStore {
                 "definition",
                 capture.path("dictionary").path("messages").path(protocolId).deepCopy());
         detail.set("catalog", capture.path("catalog").deepCopy());
+        for (JsonNode connection : capture.path("connections")) {
+            if (!connection.path("id").equals(detail.path("connection"))) {
+                continue;
+            }
+            JsonNode identity = identityAt(connection, index);
+            if (identity != null) {
+                detail.set("connectionIdentity", identity.deepCopy());
+            }
+        }
         return detail;
+    }
+
+    /** 按证据编号选择身份，未知的早期区间不使用连接最新身份补齐。 */
+    private JsonNode identityAt(JsonNode connection, int index) {
+        JsonNode result = null;
+        for (JsonNode event : connection.path("identityHistory")) {
+            if (event.path("sourceIndex").asInt() <= index) {
+                result = event;
+            }
+        }
+        return result;
     }
 
     /** 保存人工标注的操作区间；它只表示时间范围，不宣称区间内所有推送均由该操作触发。 */

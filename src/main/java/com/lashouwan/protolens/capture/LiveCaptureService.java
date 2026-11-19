@@ -158,7 +158,8 @@ public final class LiveCaptureService implements AutoCloseable {
                     .put("clearedCount", retention.path("clearedCount").asLong())
                     .put("evictedCount", retention.path("evictedCount").asLong())
                     .put("endpoint", connection.endpoint)
-                    .put("error", connection.error);
+                    .put("error", connection.error)
+                    .set("connectionInfo", retention.path("connections").path(0).deepCopy());
         }
         return result;
     }
@@ -408,6 +409,25 @@ public final class LiveCaptureService implements AutoCloseable {
         publish();
         ObjectNode result = status();
         result.set("clearedCaptureIds", mapper.valueToTree(cleared));
+        return result;
+    }
+
+    /** 重新识别后同步发布连接元数据，不要求游戏重连或等待新消息。 */
+    public synchronized ObjectNode reidentifyConnections(String captureId) throws IOException {
+        ObjectNode result = captures.reidentifyConnections(captureId);
+        version++;
+        publish();
+        return result;
+    }
+
+    /** 备注与实时广播同一入口发布，不等待新消息才更新连接标签。 */
+    public synchronized ObjectNode annotateConnection(
+            String captureId, String connectionId, String note, JsonNode expectedIdentity)
+            throws IOException {
+        ObjectNode result =
+                captures.annotateConnection(captureId, connectionId, note, expectedIdentity);
+        version++;
+        publish();
         return result;
     }
 

@@ -4,9 +4,13 @@ import { api, post } from "./types";
 import { ElMessage, ElMessageBox } from "element-plus";
 import SystemProxyControls from "./SystemProxyControls.vue";
 import CaptureConnectionGuide from "./CaptureConnectionGuide.vue";
+import ConnectionIdentityPanel from "./ConnectionIdentityPanel.vue";
+import { connectionLabel } from "./connectionIdentity";
+import type { Capture, Connection } from "./types";
 import { changedCaptures, type CaptureProgress } from "./workspaceRefresh";
 
 interface LiveConnection {
+  connectionInfo?: Connection;
   connection: string;
   captureId: string;
   frames: number;
@@ -38,6 +42,7 @@ const emit = defineEmits<{
   "update:follow": [value: boolean];
   stopped: [];
   cleared: [ids: string[]];
+  identityChanged: [capture: Capture];
 }>();
 const state = ref<LiveStatus>({
   enabled: false,
@@ -153,6 +158,7 @@ function askStop() {
 const subscribed = ref(false);
 const error = ref("");
 const instructions = ref(false);
+const identityDialog = ref(false);
 const chosen = ref("");
 let events: EventSource | undefined;
 let disposed = false;
@@ -378,10 +384,18 @@ onBeforeUnmount(() => {
                 v-for="item in state.connections"
                 :key="item.captureId"
                 :value="item.captureId"
-                :label="`${item.connection.slice(0, 8)} · ${item.retainedMessages ?? item.messages} 条 · ${item.endpoint}`"
+                :label="`${connectionLabel(item.connectionInfo || { id: item.connection })} · ${item.retainedMessages ?? item.messages} 条`"
+                :title="item.endpoint"
             /></el-select>
             <el-button text size="small" @click="selectConnection"
               >查看此连接</el-button
+            >
+            <el-button
+              text
+              size="small"
+              :disabled="!chosen"
+              @click="identityDialog = true"
+              >账号信息 / 备注</el-button
             >
             <span class="muted"
               >开启后重新进入小游戏；中途接入缺少压缩上下文时需重连游戏。</span
@@ -424,6 +438,11 @@ onBeforeUnmount(() => {
       :live="state"
       :proxy="proxy"
       @refresh="refreshDiagnostics"
+    />
+    <ConnectionIdentityPanel
+      v-model="identityDialog"
+      :capture-id="chosen"
+      @saved="emit('identityChanged', $event)"
     />
   </section>
 </template>

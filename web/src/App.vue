@@ -12,6 +12,8 @@ import { ElMessage, ElMessageBox, type TableInstance } from "element-plus";
 import JsonTree from "./JsonTree.vue";
 import SplitPane from "./SplitPane.vue";
 import LiveCapturePanel from "./LiveCapturePanel.vue";
+import ConnectionIdentityPanel from "./ConnectionIdentityPanel.vue";
+import { connectionLabel } from "./connectionIdentity";
 import AiAnalysisPanel from "./AiAnalysisPanel.vue";
 import CollectorSettingsPanel from "./CollectorSettingsPanel.vue";
 import MessageComparison from "./MessageComparison.vue";
@@ -67,6 +69,13 @@ const rowActions = ref<InstanceType<typeof MessageRowActions>>();
 const batchExcluding = ref(false);
 const selectedProtocols = shallowRef<ProtocolChoice[]>([]);
 const captures = shallowRef<Capture[]>([]);
+const connectionIdentityDialog = ref(false);
+function identityChanged(updated: Capture) {
+  captures.value = captures.value.map((item) =>
+    item.id === updated.id ? updated : item,
+  );
+  if (capture.value?.id === updated.id) capture.value = updated;
+}
 const capture = shallowRef<Capture>();
 const {
   rows,
@@ -1161,7 +1170,9 @@ async function refreshLive(
       if (
         !current ||
         (current.messages === (item.totalReceived ?? item.messageCount) &&
-          (current.clearVersion || 0) === (item.clearVersion || 0))
+          (current.clearVersion || 0) === (item.clearVersion || 0) &&
+          JSON.stringify(current.connectionInfo || {}) ===
+            JSON.stringify(item.connections[0] || {}))
       )
         return item;
       nextUnread[item.id] = shouldCountUnread(
@@ -1178,6 +1189,9 @@ async function refreshLive(
         : 0;
       return {
         ...item,
+        connections: current.connectionInfo
+          ? [current.connectionInfo]
+          : item.connections,
         totalReceived: current.messages,
         clearVersion: current.clearVersion || 0,
         clearedCount: current.clearedCount || 0,
@@ -1188,6 +1202,15 @@ async function refreshLive(
       };
     });
     unread.value = nextUnread;
+    const activeSummary = captures.value.find(
+      (item) => item.id === capture.value?.id,
+    );
+    if (activeSummary && capture.value) {
+      capture.value = {
+        ...capture.value,
+        connections: activeSummary.connections,
+      };
+    }
     const activeId = capture.value?.id;
     if (
       activeId &&
@@ -1637,6 +1660,12 @@ function jumpLatest() {
   else void loadMessages(true);
 }
 function captureName(item: Capture) {
+  if (
+    item.connections.length === 1 &&
+    (item.connections[0].note || item.connections[0].identity)
+  ) {
+    return connectionLabel(item.connections[0]);
+  }
   return item.name.startsWith("实时 · ")
     ? "实时 · " + (item.connections[0]?.id.slice(0, 8) || item.id.slice(0, 8))
     : item.name;
@@ -1954,6 +1983,7 @@ onMounted(async () => {
       @open="openLiveCapture"
       @stopped="captureStopped"
       @cleared="sessionCleared"
+      @identity-changed="identityChanged"
     />
     <div v-if="errorText" class="error-bar" role="alert">
       {{ errorText }}<el-button text @click="errorText = ''">关闭</el-button>
@@ -2117,6 +2147,12 @@ onMounted(async () => {
             >
           </div>
           <div class="capture-actions">
+            <el-button
+              size="small"
+              :disabled="!capture"
+              @click="connectionIdentityDialog = true"
+              >账号 / 备注</el-button
+            >
             <el-button
               v-if="capture?.liveState === 'CAPTURING' && !capture.continuous"
               size="small"
@@ -2301,7 +2337,8 @@ onMounted(async () => {
                     v-for="item in capture?.connections || []"
                     :key="item.id"
                     :value="item.id"
-                    :label="item.id + ' · ' + item.endpoint"
+                    :label="connectionLabel(item)"
+                    :title="item.endpoint"
                 /></el-select>
                 <el-checkbox v-model="hideHeartbeat" @change="filter"
                   >隐藏心跳</el-checkbox
@@ -2911,6 +2948,23 @@ onMounted(async () => {
                 </div>
                 <template v-if="selected">
                   <p
+                    v-if="!selected.connectionIdentity"
+                    class="muted operation-context"
+                  >
+                    此消息身份未识别；连接后来识别到的账号不自动归入本条消息。
+                  </p>
+                  <p
+                    v-if="selected.connectionIdentity"
+                    class="muted operation-context"
+                  >
+                    此消息身份：{{
+                      selected.connectionIdentity.state === "identified"
+                        ? `${selected.connectionIdentity.nickname || ""} · 角色 ${selected.connectionIdentity.roleId} · ${selected.connectionIdentity.serverId || "?"}服`
+                        : "登录请求，身份待确认"
+                    }}（依据 #{{ selected.connectionIdentity.sourceIndex }}
+                    {{ selected.connectionIdentity.sourceProtocol }}）
+                  </p>
+                  <p
                     v-if="capture?.operationContext"
                     class="muted operation-context"
                   >
@@ -3034,6 +3088,11 @@ onMounted(async () => {
         </div>
       </main>
     </div>
+    <ConnectionIdentityPanel
+      v-model="connectionIdentityDialog"
+      :capture-id="capture?.id"
+      @saved="identityChanged"
+    />
     <el-dialog
       v-model="viewDialog"
       title="常用分析视图"

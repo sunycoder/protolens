@@ -26,6 +26,32 @@ public final class CaptureController {
     }
 
     public void register(Router router) {
+        router.post("/api/captures/:id/reidentify")
+                .handler(
+                        context ->
+                                http.worker(
+                                        context,
+                                        () -> live.reidentifyConnections(context.pathParam("id"))));
+        router.post("/api/captures/:id/connection-note")
+                .handler(
+                        context ->
+                                http.worker(
+                                        context,
+                                        () -> {
+                                            JsonNode input = http.body(context);
+                                            if (!input.path("note").isTextual()
+                                                    || !input.path("connectionId").isTextual()) {
+                                                throw new IllegalArgumentException(
+                                                        "连接 ID 和备注必须为字符串");
+                                            }
+                                            return live.annotateConnection(
+                                                    context.pathParam("id"),
+                                                    input.path("connectionId").asText(),
+                                                    input.path("note").asText(),
+                                                    input.has("expectedIdentity")
+                                                            ? input.path("expectedIdentity")
+                                                            : null);
+                                        }));
         router.post("/api/captures/:id/continuous")
                 .handler(
                         context ->

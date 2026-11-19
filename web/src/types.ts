@@ -1,8 +1,21 @@
 export interface Connection {
+  note?: string;
+  identity?: ConnectionIdentity;
+  identityHistory?: ConnectionIdentity[];
+  identityHistoryTruncated?: boolean;
   id: string;
   endpoint: string;
   extensions: string;
   messages: number;
+}
+export interface ConnectionIdentity {
+  state: "identified" | "pending";
+  accountId?: string;
+  roleId?: string;
+  nickname?: string;
+  serverId?: string;
+  sourceIndex: number;
+  sourceProtocol: string;
 }
 export interface Mark {
   expired?: boolean;
@@ -38,6 +51,7 @@ export interface Capture {
   lastIndex?: number;
 }
 export interface Packet {
+  connectionIdentity?: ConnectionIdentity;
   index: number;
   direction: string;
   protocolId?: number;

@@ -1,7 +1,8 @@
-import type { Packet } from "./types.ts";
+import type { Packet, Connection } from "./types.ts";
 
 /** 实时通知只决定哪些记录有新数据，不能替用户切换正在查看的记录。 */
 export interface CaptureProgress {
+  connectionInfo?: Connection;
   captureId: string;
   messages: number;
   retainedMessages?: number;
@@ -20,13 +21,13 @@ export function changedCaptures(
   const old = new Map(
     previous.map((item) => [
       item.captureId,
-      `${item.messages}:${item.clearVersion || 0}`,
+      `${item.messages}:${item.clearVersion || 0}:${JSON.stringify(item.connectionInfo || {})}`,
     ]),
   );
   const next = new Map(
     incoming.map((item) => [
       item.captureId,
-      `${item.messages}:${item.clearVersion || 0}`,
+      `${item.messages}:${item.clearVersion || 0}:${JSON.stringify(item.connectionInfo || {})}`,
     ]),
   );
   return [...new Set([...old.keys(), ...next.keys()])].filter(
