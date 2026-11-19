@@ -210,6 +210,32 @@ try {
   );
   mkdirSync(installation);
   command("/usr/bin/ditto", [join(mount, "ProtoLens.app"), app]);
+  const plist = join(app, "Contents/Info.plist");
+  const version = command("/usr/bin/plutil", [
+    "-extract",
+    "CFBundleShortVersionString",
+    "raw",
+    "-o",
+    "-",
+    plist,
+  ]);
+  const parts = version.split(".").map(Number);
+  assert.equal(
+    command("/usr/bin/plutil", [
+      "-extract",
+      "CFBundleVersion",
+      "raw",
+      "-o",
+      "-",
+      plist,
+    ]),
+    `${parts[0] + 1}.${parts[1]}.${parts[2]}`,
+  );
+  assert.equal(
+    basename(dmg),
+    `ProtoLens-${version}-${platform}.dmg`,
+    "包名与对外版本不一致",
+  );
   const root = join(app, "Contents/app");
   const javaHome = join(app, "Contents/runtime/Contents/Home");
   const expectedMachArch = architecture === "arm64" ? "arm64" : "x86_64";

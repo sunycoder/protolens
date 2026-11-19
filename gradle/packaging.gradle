@@ -13,6 +13,8 @@ if (versionParts[0] > 255 || versionParts[1] > 255 || versionParts[2] > 65535) {
     throw new GradleException('Windows 主/次版本不能超过255，修订版本不能超过65535')
 }
 version = analyzerVersion
+def nativeAppVersion = analyzerPlatform.os == 'macos'
+        ? analyzerMacBundleVersionFor(analyzerVersion) : analyzerVersion
 // 产品独立且永久固定，不能沿用 debugger 的 UpgradeCode，否则两个应用会互相卸载。
 def analyzerUpgradeUuid = '79e567ca-23e9-4b20-a323-796305209e9b'
 def generatedResources = layout.buildDirectory.dir('generated-resources')
@@ -208,6 +210,20 @@ def jpackageExecutable = new File(System.getProperty('java.home'), "bin/jpackage
 def installerType = providers.gradleProperty('analyzerInstallerType').getOrElse(analyzerPlatform.installers.first())
 def installerStaging = new File(analyzerReleaseRoot, '.installer-staging')
 
+// 在 jpackage 签名之前生成模板；Finder 展示对外版本，CFBundleVersion 使用合法的原生构建版本。
+tasks.register('prepareMacResources') {
+    inputs.file('tools/macos/Info.plist')
+    inputs.property('analyzerVersion', analyzerVersion)
+    outputs.dir(layout.buildDirectory.dir('macos-resources'))
+    onlyIf { analyzerPlatform.os == 'macos' }
+    doLast {
+        def template = file('tools/macos/Info.plist').getText('UTF-8')
+        def output = layout.buildDirectory.file('macos-resources/Info.plist').get().asFile
+        output.parentFile.mkdirs()
+        output.setText(template.replace('@ANALYZER_VERSION@', analyzerVersion), 'UTF-8')
+    }
+}
+
 // 发布到单个平台目录，其他平台的最新包不受影响；Windows保留原取包地址兼容已有分发流程。
 def publishInstaller = { File source, File directory ->
     def releaseRoot = file('release').canonicalFile.toPath()
@@ -251,6 +267,7 @@ tasks.register('verifyPackagingPlatform') {
 }
 
 tasks.register('packageAppImage', Exec) {
+    dependsOn 'prepareMacResources'
     dependsOn 'verifyPackagingPlatform'
     dependsOn 'checkPackagingPlatforms'
     dependsOn 'updateDesktopIcons'
@@ -273,12 +290,13 @@ tasks.register('packageAppImage', Exec) {
     args '--type', 'app-image', '--name', 'ProtoLens',
             '--input', layout.buildDirectory.dir('distribution-input').get().asFile.absolutePath,
             '--dest', analyzerStagingRoot.absolutePath,
-            '--main-jar', 'protolens.jar', '--app-version', analyzerVersion,
+            '--main-jar', 'protolens.jar', '--app-version', nativeAppVersion,
             '--icon', file("${layout.buildDirectory.get().asFile}/generated-resources/desktop/${analyzerPlatform.icon}").absolutePath,
             '--java-options', '-Dfile.encoding=UTF-8',
             '--vendor', 'Stupidbird', '--add-modules', 'java.se,jdk.unsupported,jdk.crypto.ec,jdk.zipfs'
     if (analyzerPlatform.os == 'macos') {
-        args '--mac-package-identifier', 'com.lashouwan.protolens'
+        args '--mac-package-identifier', 'com.lashouwan.protolens',
+                '--resource-dir', layout.buildDirectory.dir('macos-resources').get().asFile.absolutePath
     }
     doLast {
         def staged = new File(analyzerStagingRoot, analyzerPlatform.imageName)
@@ -370,7 +388,7 @@ tasks.register('packageInstaller', Exec) {
     args '--type', installerType, '--name', 'ProtoLens',
             '--app-image', analyzerImage.absolutePath,
             '--dest', installerStaging.absolutePath,
-            '--app-version', analyzerVersion, '--vendor', 'Stupidbird',
+            '--app-version', nativeAppVersion, '--vendor', 'Stupidbird',
             '--icon', file("${layout.buildDirectory.get().asFile}/generated-resources/desktop/${analyzerPlatform.icon}").absolutePath
     if (analyzerPlatform.os == 'windows') {
         args '--win-upgrade-uuid', analyzerUpgradeUuid,

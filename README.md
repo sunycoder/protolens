@@ -190,6 +190,8 @@ sh ./gradlew packagePortable \
 
 Windows 原生安装器需要 WiX 3；macOS DMG 使用系统 `hdiutil` 和 Xcode Command Line Tools 的 `xcrun`。macOS 发布流程在 Apple Silicon、Intel 构建机分别执行 `packageInstaller packagePortable`，通过 jpackage 内置 Java 21，并携带同架构 Node 和独立采集器。源码 Gradle Wrapper 与 CI 均使用 Gradle 8.14.5。
 
+macOS 的 jpackage 不接受首段为 0 的构建版本，因此内部 `CFBundleVersion` 将对外版本主段加 1（例如 `0.1.5 → 1.1.5`，`1.0.0 → 2.0.0`），保持升级顺序；自定义 Info.plist 在签名前保留原始 `CFBundleShortVersionString`。Finder、应用界面、DMG 文件名和 Release 标签仍使用对外版本，安装验收同时核对两种版本。
+
 macOS 本机构建后可运行 `node tools/verify-macos-package.mjs build/installer/ProtoLens-<版本>-macos-<架构>.dmg macos-<架构>` 验收，架构取 `arm64` 或 `x64`。脚本挂载 DMG，将应用复制到包含空格、中文的独立目录，检查 CPU 与内置运行时，分别通过原生启动器和 Finder 使用的 Launch Services 启动，验证静态页面、用户数据目录和采集器；测试使用独立配置，不接管系统代理。`.github/workflows/macos-package.yml` 可手动运行，相关 PR / 主分支改动也会触发两种架构验收，成功后保留安装包供下载。
 
 发布工作流在两个架构均通过以上验收后才上传 GitHub Release；手动执行 `release.yml` 仅构建、验收并保存 Actions 产物，推送与应用版本一致的 `v<版本>` 标签才发布。macOS 使用包含版本和架构的独立文件名，更新检查优先推荐同架构 DMG，避免被压缩包或另一架构抢占。
