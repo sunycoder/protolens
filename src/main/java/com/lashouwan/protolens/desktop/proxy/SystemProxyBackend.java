@@ -3,7 +3,11 @@ package com.lashouwan.protolens.desktop.proxy;
 import java.io.IOException;
 
 /** 系统代理的最小读写边界；生产按平台使用 WinINet 或 networksetup，测试不修改真实网络。 */
-public interface SystemProxyBackend {
+public interface SystemProxyBackend extends AutoCloseable {
+    /** 恢复代理后释放平台会话；无持续平台资源的适配器保持空实现。 */
+    @Override
+    default void close() throws Exception {}
+
     boolean supported();
 
     ProxySettings read() throws Exception;

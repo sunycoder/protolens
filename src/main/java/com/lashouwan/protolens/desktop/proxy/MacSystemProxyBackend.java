@@ -29,6 +29,7 @@ public final class MacSystemProxyBackend implements SystemProxyBackend {
                     "bypass",
                     "-getproxybypassdomains");
     private final CommandRunner runner;
+    private final MacProxyAuthorizationSession authorization;
 
     @FunctionalInterface
     interface CommandRunner {
@@ -36,11 +37,13 @@ public final class MacSystemProxyBackend implements SystemProxyBackend {
     }
 
     public MacSystemProxyBackend() {
-        this(MacSystemProxyBackend::execute);
+        this.runner = MacSystemProxyBackend::execute;
+        this.authorization = new MacProxyAuthorizationSession();
     }
 
     MacSystemProxyBackend(CommandRunner runner) {
         this.runner = runner;
+        this.authorization = null;
     }
 
     @Override
@@ -140,6 +143,11 @@ public final class MacSystemProxyBackend implements SystemProxyBackend {
         if (!readFor(expected).equals(expected)) {
             throw new IOException("系统代理已变化，请重新确认");
         }
+        if (expected.equals(settings)) return;
+        if (authorization != null) {
+            authorization.write(expected.mac(), settings.mac());
+            return;
+        }
         String shell = transaction(expected.mac(), settings.mac());
         // shell 参数与 AppleScript 字符串分别编码；网络服务名、PAC 地址和中文均不能成为代码。
         String script =
@@ -148,6 +156,12 @@ public final class MacSystemProxyBackend implements SystemProxyBackend {
                         + " with administrator privileges with prompt \"ProtoLens 需要修改或恢复当前网络的"
                         + " HTTP/HTTPS 代理\"";
         runner.run(List.of("/usr/bin/osascript", "-e", script), true);
+    }
+
+    /** 与工作台生命周期一致，保留到恢复完成后再释放，不在每次恢复时销毁授权会话。 */
+    @Override
+    public void close() {
+        if (authorization != null) authorization.close();
     }
 
     /** 授权结束后再次核对全部快照；失败时倒序回滚已完成项，外部改过的项不覆盖。 */

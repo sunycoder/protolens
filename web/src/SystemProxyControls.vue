@@ -121,7 +121,7 @@ onMounted(async () => {
         :loading="busy"
         :title="
           state.requiresAuthorization
-            ? 'macOS 将请求系统授权，恢复时也可能需要授权'
+            ? '首次按 macOS 提示授权，本次运行复用；授权失效时重新确认'
             : ''
         "
         @click="connect()"

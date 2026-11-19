@@ -66,6 +66,7 @@ tasks.register('prepareCollector', JavaExec) {
 }
 
 tasks.register('stageNativeTools') {
+    dependsOn 'prepareMacProxySession'
     dependsOn 'prepareCollector'
     inputs.files(nativeNode, nativeCollector)
     inputs.files(provider { analyzerPlatform.os == 'macos'
@@ -105,6 +106,10 @@ tasks.register('stageNativeTools') {
         if (!versionMatch.find()) { throw new GradleException('无法识别 mitmdump 版本') }
         def mitmVersion = versionMatch.group(1)
         def target = layout.buildDirectory.dir('native-tools').get().asFile
+        if (analyzerPlatform.os == 'macos') {
+            copy { from layout.buildDirectory.file('macos-native/ProtoLensProxySession'); into target }
+            new File(target, 'ProtoLensProxySession').setExecutable(true, false)
+        }
         copy { from node; into target; rename { "node${analyzerPlatform.executableSuffix}" } }
         if (analyzerPlatform.os != 'macos') {
             copy { from collector; into target; rename { "mitmdump${analyzerPlatform.executableSuffix}" } }
@@ -156,6 +161,24 @@ tasks.register('stageNativeTools') {
         new File(target, 'versions.txt').setText("platform=${analyzerPlatform.id}\nnode=${identity[2]}\nmitmproxy=${mitmVersion}\n", 'UTF-8')
     }
 }
+
+// 授权组件与当前 JDK/采集器使用相同的本机构架；不安装常驻服务、不要求整个工作台以 root 运行。
+tasks.register('prepareMacProxySession', Exec) {
+    group = 'build'
+    description = '构建当前用户运行的 macOS 网络授权会话组件。'
+    onlyIf { analyzerPlatform.os == 'macos' }
+    inputs.file('tools/macos/ProxySession.m')
+    inputs.property('nativePlatform', analyzerPlatform.id)
+    outputs.file(layout.buildDirectory.file('macos-native/ProtoLensProxySession'))
+    doFirst { layout.buildDirectory.dir('macos-native').get().asFile.mkdirs() }
+    commandLine 'xcrun', 'clang', '-fobjc-arc', '-Wall', '-Wextra',
+            '-framework', 'Foundation', '-framework', 'Security', '-framework', 'SystemConfiguration',
+            file('tools/macos/ProxySession.m').absolutePath, '-o',
+            layout.buildDirectory.file('macos-native/ProtoLensProxySession').get().asFile.absolutePath
+}
+
+tasks.named('run') { dependsOn 'prepareMacProxySession' }
+tasks.named('classes') { dependsOn 'prepareMacProxySession' }
 tasks.register('stageDependencyLicenses') {
     dependsOn 'webInstall'
     inputs.files(configurations.runtimeClasspath, 'web/node_modules/acorn/LICENSE')

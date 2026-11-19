@@ -237,6 +237,10 @@ try {
     "包名与对外版本不一致",
   );
   const root = join(app, "Contents/app");
+  assert.ok(
+    existsSync(join(root, "runtime-tools/ProtoLensProxySession")),
+    "缺少 macOS 网络授权组件",
+  );
   const collectorBundle = join(root, "runtime-tools/mitmproxy.app");
   const collectorExecutable = join(collectorBundle, "Contents/MacOS/mitmdump");
   const javaHome = join(app, "Contents/runtime/Contents/Home");
