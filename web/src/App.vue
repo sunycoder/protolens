@@ -1,14 +1,23 @@
 <script setup lang="ts">
-import {
-  DEFAULT_PAGE_SIZE,
-  MAX_CAPTURE_NAME_LENGTH,
-  MAX_OPERATION_CONTEXT_LENGTH,
-  CACHE_BUDGET,
-  MAX_UPLOAD_BYTES,
-  MESSAGE_REQUEST_TIMEOUT_MS,
-  DETAIL_REQUEST_TIMEOUT_MS,
-} from "./constants";
-import { IdentityState, DecodeStatus, MessageDirection } from "./domain";
+import AnalysisTabsBar from "./AnalysisTabsBar.vue";
+import { useCaptureFeed } from "./useCaptureFeed";
+import { useSavedViews } from "./useSavedViews";
+import SavedViewsDialog from "./SavedViewsDialog.vue";
+import WorkbenchHeader from "./WorkbenchHeader.vue";
+import CaptureRecordToolbar from "./CaptureRecordToolbar.vue";
+import { useWorkbenchLayout } from "./useWorkbenchLayout";
+import { useMessageRelations } from "./useMessageRelations";
+import { useMessageHistory } from "./useMessageHistory";
+import { useMessageLoader } from "./useMessageLoader";
+import { useCaptureOperations } from "./useCaptureOperations";
+import CaptureOperationDialog from "./CaptureOperationDialog.vue";
+import CaptureMessageTable from "./CaptureMessageTable.vue";
+import CaptureSidebar from "./CaptureSidebar.vue";
+import { captureName } from "./capturePresentation";
+import { useWorkbenchSettings } from "./useWorkbenchSettings";
+import WorkbenchSettingsDialog from "./WorkbenchSettingsDialog.vue";
+import { DEFAULT_PAGE_SIZE, MAX_CAPTURE_NAME_LENGTH } from "./constants";
+
 import {
   computed,
   defineAsyncComponent,
@@ -19,54 +28,54 @@ import {
   shallowRef,
   watch,
 } from "vue";
-import { ElMessage, ElMessageBox, type TableInstance } from "element-plus";
-import JsonTree from "./JsonTree.vue";
-import { useResearchNotes } from "./useResearchNotes";
+import { ElMessage, ElMessageBox } from "element-plus";
+
+import CaptureFilterToolbar from "./CaptureFilterToolbar.vue";
+import { useWorkspaceFilters } from "./useWorkspaceFilters";
+import { statusText } from "./capturePresentation";
+
+import MessageDetailPanel from "./MessageDetailPanel.vue";
+import { useMessageInspector } from "./useMessageInspector";
+import MessageGroupPreview from "./MessageGroupPreview.vue";
+import { useReadingTools } from "./useReadingTools";
+import { useAnalysisTabs, type AnalysisTab } from "./useAnalysisTabs";
+import { useAnalysisProject } from "./useAnalysisProject";
+import { useResearchWorkspace } from "./useResearchWorkspace";
+import MessageNoteDialog from "./MessageNoteDialog.vue";
 import { useFieldWatch } from "./useFieldWatch";
 import {
   foldRows,
   groupedMessageRows,
   type MessageGrouping,
   repeatGroups,
-  recordGroups,
-  exitTemporaryQuery,
-  MAX_ANALYSIS_TABS,
-  type FieldColumn,
-  type MessageNote,
 } from "./analysisTools";
 const ResearchPanel = defineAsyncComponent(() => import("./ResearchPanel.vue"));
 import SplitPane from "./SplitPane.vue";
 import LiveCapturePanel from "./LiveCapturePanel.vue";
 import ConnectionIdentityPanel from "./ConnectionIdentityPanel.vue";
-import { connectionLabel } from "./connectionIdentity";
-import AiAnalysisPanel from "./AiAnalysisPanel.vue";
-import CollectorSettingsPanel from "./CollectorSettingsPanel.vue";
+
 import MessageComparison from "./MessageComparison.vue";
-import HighlightedText from "./HighlightedText.vue";
-import MessageRowActions from "./MessageRowActions.vue";
+
 import ProtocolOverview from "./ProtocolOverview.vue";
 import LiveAttentionBar from "./LiveAttentionBar.vue";
-import CopyText from "./CopyText.vue";
+
 import { useCaptureActivity } from "./useCaptureActivity";
 import { useActivityWindow } from "./useActivityWindow";
 import { useProtocolWatch } from "./useProtocolWatch";
-import { useInlineCopy } from "./useInlineCopy";
+
 import {
-  ATTENTION_STATUS,
   activityQuery,
-  latestQuery,
   readingRange,
   relaxFilter,
   type EmptyReason,
-  type ActivityDelta,
 } from "./liveReading";
-import { RequestGate } from "./workspaceRefresh";
+
 import ProtocolQueryPanel from "./ProtocolQueryPanel.vue";
 import {
   protocolMessageQuery,
   type ProtocolQueryTarget,
 } from "./protocolQuery";
-import TextPreview from "./TextPreview.vue";
+
 import { useQueryResults } from "./useQueryResults";
 import { useMessageSelection } from "./useMessageSelection";
 import {
@@ -76,7 +85,6 @@ import {
   validPlace,
   patchQuery,
   type ReadingPlace,
-  type SavedView,
 } from "./workspaceSession";
 import {
   protocolChoice,
@@ -85,33 +93,18 @@ import {
   type ProtocolChoice,
 } from "./protocolSelection";
 import {
-  defaultColumns,
-  defaultQuery,
-  readColumns,
-  listMinimumWidth,
-  chooseDetailLayout,
-  contextQuery,
-  contextRankParams,
   allowReadingShortcut,
   type WorkspaceQuery,
-  type DetailLayout,
 } from "./workspaceInteractions";
-import {
-  findFieldMatches,
-  neighbourPage,
-  pageContaining,
-} from "./analysisWorkspace";
+import { pageContaining } from "./analysisWorkspace";
 import { api, post, type Capture, type Packet, type Page } from "./types";
-import {
-  reconcileRows,
-  shouldRefreshMessages,
-  shouldCountUnread,
-  type CaptureProgress,
-} from "./workspaceRefresh";
 
 const livePanel = ref<InstanceType<typeof LiveCapturePanel>>();
-const packetTable = ref<TableInstance>();
-const rowActions = ref<InstanceType<typeof MessageRowActions>>();
+const messageTable = ref<InstanceType<typeof CaptureMessageTable>>();
+const packetTable = computed(() => messageTable.value?.table);
+const searchHistory = ref<InstanceType<typeof CaptureFilterToolbar>>();
+
+const rowActions = computed(() => messageTable.value?.rowActions);
 const batchExcluding = ref(false);
 const selectedProtocols = shallowRef<ProtocolChoice[]>([]);
 const captures = shallowRef<Capture[]>([]);
@@ -123,11 +116,62 @@ function identityChanged(updated: Capture) {
   if (capture.value?.id === updated.id) capture.value = updated;
 }
 const capture = shallowRef<Capture>();
-const research = useResearchNotes(() => capture.value);
-const groupedRecords = computed(() => recordGroups(captures.value));
-const researchOpen = ref(false),
-  researchMode = ref("review");
-const lastOperationRange = ref<{ from: number; to: number }>();
+const readingTools = useReadingTools({
+  id: () => capture.value?.id,
+  table: () => packetTable.value,
+  place: readingPlace,
+  following: () => isFollowing.value,
+  field: () => focusedField.value,
+  restore: (checkpoint) =>
+    restoreAnalysisTab({
+      id: -1,
+      name: "返回刚才位置",
+      place: checkpoint.place,
+      following: checkpoint.following,
+      field: checkpoint.field,
+    }),
+  select: (row) => select(row),
+  inspect: (row) => selectDetail(row),
+  pause: () => pauseListForInteraction("history"),
+  rebuild: () => tableRevision.value++,
+});
+const {
+  layout: workspaceLayout,
+  navigationReturn,
+  restoring: restoringNavigation,
+  selectedRange: selectedOperationRange,
+  previewGroup,
+  previewOpen: groupPreviewOpen,
+  checkpoint: saveNavigationCheckpoint,
+  back: returnReadingCheckpoint,
+  maximize: toggleDetailMaximize,
+  rowClick: tableRowClick,
+  preview: openGroupPreview,
+  closePreview: closeGroupPreview,
+  inspect: inspectGroupMessage,
+  resetColumn: resetColumnFromHeader,
+} = readingTools;
+const researchWorkspace = useResearchWorkspace({
+  capture: () => capture.value,
+  selected: () => selected.value,
+  canEdit: () => !health.value.analysisProjects || projectSync.ready.value,
+  refreshMessages: () => loadMessages(viewingTail.value),
+  addWatch: (field, packet) => fieldWatch.add(field, packet),
+  failure,
+});
+const {
+  research,
+  researchOpen,
+  researchMode,
+  openResearch,
+  watchField,
+  addFieldColumn,
+  removeFieldColumn,
+  removeNote,
+  editNote,
+  fieldAnnotations,
+} = researchWorkspace;
+
 const messageGrouping = ref<MessageGrouping>("none");
 const foldRepeats = computed(() => messageGrouping.value !== "none");
 const expandedRepeats = ref(new Set<number>());
@@ -136,35 +180,24 @@ const temporaryView = shallowRef<{
   origin: WorkspaceQuery;
   applied: WorkspaceQuery;
 }>();
-const noteDialog = ref(false);
-const noteDraft = ref<MessageNote>({
-  index: 0,
-  path: "",
-  text: "",
-  kind: "备注",
+const analysisTabState = useAnalysisTabs({
+  id: () => capture.value?.id,
+  place: readingPlace,
+  follow: () => autoFollow.value,
+  field: () => focusedField.value,
+  temporary: () => temporaryView.value,
+  restore: restoreAnalysisTab,
 });
-const analysisTabs = ref<
-  {
-    id: number;
-    name: string;
-    place?: ReadingPlace;
-    following: boolean;
-    field: string;
-    temporary?: {
-      name: string;
-      origin: WorkspaceQuery;
-      applied: WorkspaceQuery;
-    };
-  }[]
->([]);
-const activeAnalysisTab = ref(0);
-let analysisTabSequence = 0;
-let switchingAnalysisTab = false;
+const {
+  tabs: analysisTabs,
+  active: activeAnalysisTab,
+  switching: switchingAnalysisTab,
+} = analysisTabState;
+const queryResults = useQueryResults();
 const {
   rows,
   total,
   page,
-  pageOffset,
   displayedPage,
   displayedQuery,
   pendingQuery,
@@ -173,7 +206,13 @@ const {
   queryPublication,
   messageGate,
   queryMetrics,
-} = useQueryResults();
+} = queryResults;
+const selection = useMessageSelection(
+  () => capture.value,
+  () => pauseListForInteraction("selection"),
+  () => pauseOnSelect.value,
+);
+
 const {
   selected,
   selectedRowIndex,
@@ -183,86 +222,70 @@ const {
   detailOpen,
   detailGate,
   detailCache,
-  detailMs,
   selectDetail,
-} = useMessageSelection(
-  () => capture.value,
-  () => pauseListForInteraction("selection"),
-  () => pauseOnSelect.value,
-);
-const expandedTags = ref(false);
-const columns = ref(readColumns(localStorage.getItem("analyzer.columns.v3")));
-const tableRevision = ref(0);
-const splitPane = ref<InstanceType<typeof SplitPane>>();
-const dataRegion = ref<HTMLElement>();
-const regionSize = shallowRef({
-  width: window.innerWidth,
-  height: window.innerHeight - 190,
+} = selection;
+const tab = ref("tree");
+const filters = useWorkspaceFilters({
+  capture: () => capture.value,
+  query: () => displayedQuery.value,
 });
-let regionObserver: ResizeObserver | undefined;
-const busy = ref(false);
-const loading = ref(false);
-const interactiveLoading = ref(false);
-const sidebarCollapsed = ref(
-  localStorage.getItem("analyzer.sidebarCollapsed") !== "false",
-);
-const focusMode = ref(false);
-const savedDock = localStorage.getItem("analyzer.layoutPreference.v3");
-const detailDock = ref<DetailLayout>(
-  ["auto", "right", "bottom", "overlay"].includes(savedDock || "")
-    ? (savedDock as DetailLayout)
-    : "auto",
-);
-const listWidth = computed(
-  () =>
-    listMinimumWidth(columns.value) +
-    research.columns.value.length * 150 +
-    (batchExcluding.value ? 36 : 0),
-);
-const effectiveLayout = computed(() =>
-  chooseDetailLayout(
-    regionSize.value.width,
-    regionSize.value.height,
-    detailDock.value,
-    listWidth.value,
-  ),
-);
-const detailDirection = computed(() =>
-  effectiveLayout.value === "bottom" ? "vertical" : "horizontal",
-);
-const sidebarVisible = computed(
-  () => !focusMode.value && (!sidebarCollapsed.value || !capture.value),
-);
-const detailVisible = computed(() => detailOpen.value && !focusMode.value);
-function measureWorkspace() {
-  const rect = dataRegion.value?.getBoundingClientRect();
-  if (rect)
-    regionSize.value = {
-      width: Math.round(rect.width),
-      height: Math.round(rect.height),
-    };
-}
-watch(sidebarCollapsed, (value) =>
-  localStorage.setItem("analyzer.sidebarCollapsed", String(value)),
-);
-watch(detailDock, (value) =>
-  localStorage.setItem("analyzer.layoutPreference.v3", value),
-);
-watch(
+const {
+  search,
+  protocolId,
+  messageIndex,
+  appliedProtocolId,
+  appliedMessageIndex,
+  include,
+  exclude,
+  appliedInclude,
+  appliedExclude,
+  direction,
+  status,
+  connection,
+  hideHeartbeat,
+  selectedRange,
+  appliedSearch,
+  order,
+  expandedTags,
+  advancedFilters,
+  draftQuery,
+  activeFilters,
+  currentQuery,
+  applyQuery,
+} = filters;
+const workbenchLayout = useWorkbenchLayout({
+  detailOpen,
+  hasCapture: () => !!capture.value,
+  fieldCount: () => research.columns.value.length,
+  batchExcluding: () => batchExcluding.value,
+  table: () => packetTable.value,
+  scrollTop: tableScrollTop,
+  selectedRow: () =>
+    rows.value.find((item) => item.index === selectedRowIndex.value),
+  resetFilterPresentation: () => (expandedTags.value = false),
+});
+const {
   columns,
-  (value) => localStorage.setItem("analyzer.columns.v3", JSON.stringify(value)),
-  { deep: true },
-);
-watch([detailDirection, detailVisible, sidebarVisible], async () => {
-  const top = tableScrollTop();
-  await nextTick();
-  packetTable.value?.doLayout();
-  packetTable.value?.setScrollTop(top);
-});
+  tableRevision,
+  splitPane,
+  dataRegion,
+  sidebarCollapsed,
+  focusMode,
+  detailDock,
+  listWidth,
+  effectiveLayout,
+  detailDirection,
+  sidebarVisible,
+  detailVisible,
+  resetLayout,
+} = workbenchLayout;
+
+const busy = ref(false);
 const health = ref({
   ready: false,
   apiVersion: 0,
   analysisTools: false,
+  analysisProjects: false,
   activityWindow: false,
   catalog: {
     messageCount: 0,
@@ -275,142 +298,13 @@ const health = ref({
 const supportsAnalysis = computed(
   () => health.value.apiVersion === 2 && health.value.analysisTools,
 );
-const search = ref("");
-const protocolId = ref("");
-const messageIndex = ref("");
-const appliedProtocolId = ref("");
-const appliedMessageIndex = ref("");
-const jumpTarget = ref<number>();
 const locatedRow = ref<number>();
-const advancedFilters = ref(false);
-const tableSettings = ref(false);
-const comparisonBase = shallowRef<Packet>();
-const comparisonDialog = ref(false);
-const order = ref(localStorage.getItem("analyzer.order") || "desc");
-const include = ref("");
-const exclude = ref("");
-const appliedInclude = ref("");
-const appliedExclude = ref("");
-const filterDialog = ref(false);
-const settingsDialog = ref(false);
-const settingsTab = ref("protocol");
-const settingsBusy = ref(false);
-const update = ref({
-  currentVersion: "",
-  latestVersion: "",
-  downloadUrl: "",
-  fileName: "",
-  available: false,
-  releaseUrl: "",
+const workbenchSettings = useWorkbenchSettings({
+  catalogLoaded: (catalog) => (health.value.catalog = catalog),
+  failure,
 });
-const settings = ref({
-  serverPort: 0,
-  frontendPort: 0,
-  backendAddress: "",
-  browserAddress: "",
-  proxyAddress: "",
-  configFile: "",
-  configPrecedence: "",
-  competitorPath: "",
-  protocolFile: "",
-  loadedProtocolFile: "",
-  maxMessages: CACHE_BUDGET.defaultMessages,
-  maxCacheMiB: CACHE_BUDGET.defaultMiB,
-  collectorPort: 18888,
-  autoStartCollector: true,
-  catalogError: "",
-});
-interface ProtocolCandidate {
-  path: string;
-  relativePath: string;
-  sizeBytes: number;
-  modifiedAt: string;
-}
-const protocolCandidates = ref<ProtocolCandidate[]>([]);
-const selectedProtocolFile = ref("");
-function sourceChanged() {
-  protocolCandidates.value = [];
-  selectedProtocolFile.value = "";
-}
-async function scanProtocolFiles() {
-  const result = await post<{ candidates: ProtocolCandidate[] }>(
-    "/api/catalog/discover",
-    { path: settings.value.competitorPath },
-  );
-  protocolCandidates.value = result.candidates;
-  const chosen = result.candidates.find(
-    (item) =>
-      item.path === selectedProtocolFile.value ||
-      item.relativePath === selectedProtocolFile.value,
-  );
-  selectedProtocolFile.value =
-    chosen?.path ||
-    (result.candidates.length === 1 ? result.candidates[0].path : "");
-  if (!result.candidates.length)
-    ElMessage.warning("没有找到 thrift_data.js，请检查路径或直接填写文件路径");
-}
-async function findProtocolFiles() {
-  settingsBusy.value = true;
-  try {
-    await scanProtocolFiles();
-  } catch (error) {
-    failure(error);
-  } finally {
-    settingsBusy.value = false;
-  }
-}
-async function openSettings() {
-  try {
-    settings.value = await api("/api/settings");
-    protocolCandidates.value = [];
-    selectedProtocolFile.value = settings.value.protocolFile || "";
-    settingsDialog.value = true;
-  } catch (error) {
-    failure(error);
-  }
-}
-async function checkUpdate() {
-  try {
-    update.value = await api("/api/update");
-    if (update.value.available)
-      ElMessage.success(`发现 ProtoLens ${update.value.latestVersion}`);
-    else ElMessage.info("当前已是最新版本");
-  } catch (error) {
-    failure(error);
-  }
-}
-async function saveSettings() {
-  settingsBusy.value = true;
-  try {
-    settings.value = await post("/api/settings", settings.value);
-    ElMessage.success("缓存设置已保存，新连接生效");
-  } catch (error) {
-    failure(error);
-  } finally {
-    settingsBusy.value = false;
-  }
-}
-async function reloadCatalog() {
-  settingsBusy.value = true;
-  try {
-    await scanProtocolFiles();
-    if (!selectedProtocolFile.value) {
-      if (protocolCandidates.value.length > 1)
-        ElMessage.warning("找到多个协议文件，请从下拉列表选择要加载的一份");
-      return;
-    }
-    health.value.catalog = await post("/api/catalog/reload", {
-      path: settings.value.competitorPath,
-      file: selectedProtocolFile.value,
-    });
-    settings.value = await api("/api/settings");
-    ElMessage.success("已加载协议，新连接使用新字典；已有记录保持原字典");
-  } catch (error) {
-    failure(error);
-  } finally {
-    settingsBusy.value = false;
-  }
-}
+const { settingsDialog, update, settings, selectedProtocolFile, openSettings } =
+  workbenchSettings;
 async function deleteCapture(item: Capture) {
   try {
     await ElMessageBox.confirm(
@@ -422,7 +316,7 @@ async function deleteCapture(item: Capture) {
     if (capture.value?.id === item.id) {
       messageGate.cancel();
       detailGate.cancel();
-      pendingLive = false;
+      messageLoader.clearDeferred();
       capture.value = undefined;
       selected.value = undefined;
       selectedRowIndex.value = undefined;
@@ -447,8 +341,7 @@ async function sessionCleared(ids: string[]) {
   if (currentId && cleared.has(currentId)) {
     messageGate.cancel();
     detailGate.cancel();
-    if (refreshTimer) clearTimeout(refreshTimer);
-    pendingLive = false;
+    messageLoader.clearDeferred();
     selected.value = undefined;
     selectedRowIndex.value = undefined;
     rows.value = [];
@@ -520,91 +413,25 @@ function excludeProtocol(row: Packet) {
     exclude: mergeProtocolExclusions(shown.exclude, [choice]),
   });
 }
-const direction = ref("");
-const status = ref("");
-const connection = ref("");
-const hideHeartbeat = ref(true);
-const tab = ref("tree");
+
 const dark = ref(localStorage.getItem("analyzer.dark") === "true");
-const localPath = ref("");
-const fileInput = ref<HTMLInputElement>();
-const selectedRange = ref("");
-const operation = ref({ name: "", from: 0, to: 0, context: "" });
-const markDialog = ref(false);
-const operationStart = ref<{ captureId: string; index: number }>();
-async function beginOperation() {
-  if (!capture.value) return;
-  const id = capture.value.id;
-  try {
-    const item = await api<Capture>(`/api/captures/${id}/overview`);
-    if (capture.value?.id !== id) return;
-    operationStart.value = {
-      captureId: item.id,
-      index: (item.lastIndex ?? -1) + 1,
-    };
-    ElMessage.success("操作起点已记录，现在去游戏执行操作，再点击结束");
-  } catch (error) {
-    failure(error);
-  }
-}
-async function endOperation() {
-  if (
-    !capture.value ||
-    !operationStart.value ||
-    operationStart.value.captureId !== capture.value.id
-  )
-    return;
-  const id = capture.value.id;
-  try {
-    const item = await api<Capture>(`/api/captures/${id}/overview`);
-    if (capture.value?.id !== id) return;
-    if ((item.lastIndex ?? -1) < operationStart.value.index) {
-      ElMessage.warning("操作后尚未收到消息，请稍后重试");
-      return;
-    }
-    capture.value = item;
-    operation.value = {
-      name: "操作分析 · " + new Date().toLocaleString("sv-SE"),
-      from: operationStart.value.index,
-      to: item.lastIndex!,
-      context: "",
-    };
-    lastOperationRange.value = {
-      from: operation.value.from,
-      to: operation.value.to,
-    };
-    operationStart.value = undefined;
-    if (supportsAnalysis.value) {
-      markDialog.value = false;
-      openResearch("review");
-    } else markDialog.value = true;
-  } catch (error) {
-    failure(error);
-  }
-}
-async function freezeOperation() {
-  if (!capture.value || busy.value) return;
-  const id = capture.value.id;
-  busy.value = true;
-  try {
-    const frozen = await post<Capture>(
-      `/api/captures/${id}/snapshot`,
-      operation.value,
-    );
-    operationStart.value = undefined;
-    markDialog.value = false;
-    await reloadCaptures();
-    if (capture.value?.id === id) {
-      applyQuery({ ...defaultQuery, hideHeartbeat: false });
-      await openCapture(frozen);
-    }
-    ElMessage.success("分析快照已保存，原连接继续采集，可将本记录交给 AI 查询");
-  } catch (error) {
-    failure(error);
-  } finally {
-    busy.value = false;
-  }
-}
+const captureOperations = useCaptureOperations({
+  capture,
+  busy,
+  selected: () => selected.value,
+  projectEnabled: () => health.value.analysisProjects,
+  supportsAnalysis: () => supportsAnalysis.value,
+  flushProject: () => projectSync.flush(),
+  reloadCaptures,
+  openCapture,
+  applyQuery,
+  quickQuery,
+  openResearch,
+  failure,
+});
+const { operation, markDialog, operationStart, lastOperationRange, mark } =
+  captureOperations;
+
 const mainWorkspace = ref<"captures" | "catalog">("captures");
 const protocolQueryTarget = shallowRef<ProtocolQueryTarget>();
 let protocolQuerySequence = 0;
@@ -650,42 +477,19 @@ const workspaceView = ref<"messages" | "protocols">("messages");
 watch(workspaceView, (view) => {
   if (view === "protocols") pauseListForInteraction();
 });
-const snapshotBusy = ref(false);
-const continuousBusy = ref(false);
-const savedSnapshot = ref<Capture>();
-const comparingPrevious = ref(false);
 const undoPlace = shallowRef<ReadingPlace>();
-const savedViews = ref<SavedView[]>(
-  readStored<unknown>("analyzer.views.v1", []) instanceof Array
-    ? readStored<SavedView[]>("analyzer.views.v1", [])
-        .filter(
-          (view) =>
-            view &&
-            typeof view.name === "string" &&
-            typeof view.dictionary === "string" &&
-            validQuery(view.query),
-        )
-        .slice(0, 12)
-    : [],
-);
-const viewDialog = ref(false);
+const savedViewState = useSavedViews({
+  capture: () => capture.value,
+  query: () => displayedQuery.value,
+  columns,
+  quickQuery,
+  queryError,
+  failure,
+});
+const { viewDialog } = savedViewState;
+
 let restoringSession = true;
 
-function draftQuery(): WorkspaceQuery {
-  return {
-    ...currentQuery(),
-    q: search.value.trim(),
-    protocolId: protocolId.value.trim(),
-    messageIndex: messageIndex.value.trim(),
-    include: include.value.trim(),
-    exclude: exclude.value.trim(),
-  };
-}
-const hasDraft = computed(
-  () =>
-    !!displayedQuery.value &&
-    JSON.stringify(draftQuery()) !== JSON.stringify(displayedQuery.value),
-);
 function readingPlace(): ReadingPlace | undefined {
   if (!capture.value || !displayedQuery.value) return;
   return {
@@ -703,48 +507,45 @@ function saveReadingPlace() {
   const place = readingPlace();
   if (place) {
     writeStored("analyzer.reading.v1", place);
-    if (!switchingAnalysisTab) {
-      const current = analysisTabs.value.find(
-        (item) => item.id === activeAnalysisTab.value,
-      );
-      if (current) {
-        current.place = place;
-        current.following = autoFollow.value;
-        current.field = focusedField.value;
-        current.temporary = temporaryView.value;
-      }
-    }
+    analysisTabState.remember();
   }
+}
+function useSelectedRange(action: "mark" | "snapshot" | "review") {
+  const range = selectedOperationRange.value;
+  if (!range) return;
+  operation.value = { name: "", context: "", ...range };
+  lastOperationRange.value = { ...range };
+  if (action === "review") openResearch("review");
+  else {
+    operation.value.name = action === "snapshot" ? "区间分析快照" : "";
+    markDialog.value = true;
+  }
+}
+async function confirmReloadProject() {
+  try {
+    await ElMessageBox.confirm(
+      "重新加载会用记录中已保存的成果替换当前未保存的批注与视图，请先导出需要保留的输入。",
+      "重新加载分析成果",
+      {
+        type: "warning",
+        confirmButtonText: "重新加载",
+        cancelButtonText: "保留当前输入",
+      },
+    );
+    await projectSync.reload();
+  } catch {}
 }
 watch(
   () => capture.value?.id,
   () => {
-    analysisTabs.value = [
-      {
-        id: ++analysisTabSequence,
-        name: "全部消息",
-        following: true,
-        field: "",
-      },
-    ];
-    activeAnalysisTab.value = analysisTabSequence;
+    workspaceLayout.maximized.value = false;
+    navigationReturn.value = undefined;
+    selectedOperationRange.value = undefined;
     expandedRepeats.value = new Set();
     temporaryView.value = undefined;
     lastOperationRange.value = undefined;
   },
 );
-function openResearch(mode = "review") {
-  researchMode.value = mode;
-  researchOpen.value = true;
-}
-function watchField(field: FieldColumn) {
-  try {
-    fieldWatch.add(field, selected.value);
-    researchOpen.value = false;
-  } catch (error) {
-    failure(error);
-  }
-}
 async function locateWatchedField(key: string) {
   const item = fieldWatch.items.value.find((item) => item.key === key);
   if (!item || !capture.value) return;
@@ -762,53 +563,6 @@ async function checkBackend() {
     failure(error);
   }
 }
-async function addFieldColumn(field: FieldColumn) {
-  try {
-    research.addColumn(field.path, field.label);
-    await loadMessages(viewingTail.value);
-  } catch (error) {
-    failure(error);
-  }
-}
-async function removeFieldColumn(path: string) {
-  try {
-    research.removeColumn(path);
-    await loadMessages(viewingTail.value);
-  } catch (error) {
-    failure(error);
-  }
-}
-function removeNote(note: MessageNote) {
-  try {
-    research.removeNote(note.index, note.path);
-  } catch (error) {
-    failure(error);
-  }
-}
-function editNote(path = "") {
-  if (!selected.value) return;
-  noteDraft.value = {
-    ...(research.notes.value.find(
-      (item) => item.index === selected.value!.index && item.path === path,
-    ) || { index: selected.value.index, path, text: "", kind: "备注" }),
-  };
-  noteDialog.value = true;
-}
-function saveNote() {
-  try {
-    research.saveNote(noteDraft.value);
-    noteDialog.value = false;
-  } catch (error) {
-    failure(error);
-  }
-}
-const fieldAnnotations = computed(() =>
-  Object.fromEntries(
-    research.notes.value
-      .filter((item) => item.index === selected.value?.index)
-      .map((item) => [item.path, `${item.kind}：${item.text}`]),
-  ),
-);
 const groupingRows = computed(() =>
   groupedMessageRows(rows.value, messageGrouping.value),
 );
@@ -858,6 +612,7 @@ async function showResearchRange(value: {
   index?: number;
   name: string;
 }) {
+  saveNavigationCheckpoint();
   const origin =
     temporaryView.value?.origin || displayedQuery.value || currentQuery();
   await quickQuery({ range: `recent:${value.from}:${value.to}` });
@@ -871,100 +626,21 @@ async function showResearchRange(value: {
   const row = rows.value.find((item) => item.index === value.index);
   if (row) await revealRow(row);
 }
-async function newAnalysisTab() {
-  if (analysisTabs.value.length >= MAX_ANALYSIS_TABS) {
-    ElMessage.warning("最多打开 5 个临时分析页签");
-    return;
-  }
-  saveReadingPlace();
-  const place = readingPlace();
-  if (!place) return;
-  const id = ++analysisTabSequence;
-  analysisTabs.value.push({
-    id,
-    name: `分析 ${analysisTabs.value.length + 1}`,
-    place,
-    following: autoFollow.value,
-    field: focusedField.value,
-    temporary: temporaryView.value,
-  });
-  activeAnalysisTab.value = id;
-}
-async function switchAnalysisTab(id: number) {
-  if (id === activeAnalysisTab.value || switchingAnalysisTab) return;
-  saveReadingPlace();
-  const target = analysisTabs.value.find((item) => item.id === id),
-    place = target?.place;
-  if (!target) return;
-  switchingAnalysisTab = true;
-  pauseListForInteraction("history");
-  const recordId = capture.value?.id;
-  detailGate.cancel();
-  detailLoading.value = false;
+function newAnalysisTab() {
   try {
-    if (place && place.captureId === capture.value?.id) {
-      browsingHistory.value = !target.following;
-      await loadMessages(target.following, false, {
-        query: place.query,
-        page: place.page,
-        scrollTop: place.scrollTop,
-        onCommit: () => {
-          applyQuery(place.query);
-          activeAnalysisTab.value = id;
-          selected.value = undefined;
-          selectedRowIndex.value = undefined;
-          detailOpen.value = false;
-          temporaryView.value = target.temporary;
-        },
-      });
-      if (
-        queryError.value ||
-        capture.value?.id !== recordId ||
-        activeAnalysisTab.value !== id
-      )
-        return;
-      if (!queryError.value && place.selectedIndex !== undefined) {
-        const row = rows.value.find(
-          (item) => item.index === place.selectedIndex,
-        );
-        if (row) await selectDetail(row);
-        else if (place.selectedIndex >= (capture.value?.firstIndex || 0)) {
-          try {
-            await selectDetail(
-              await api<Packet>(
-                `/api/captures/${place.captureId}/messages/${place.selectedIndex}`,
-              ),
-            );
-          } catch {
-            ElMessage.info("此页签原选中消息已不可用");
-          }
-        } else ElMessage.info("此页签原选中消息已淘汰，已恢复筛选与位置");
-        detailOpen.value = place.detailOpen;
-        tab.value = place.tab;
-        if (target.field && selected.value) await focusField(target.field);
-      }
-      if (target.following && !queryError.value) autoFollow.value = true;
-      await nextTick();
-    }
-  } finally {
-    switchingAnalysisTab = false;
+    analysisTabState.add();
+  } catch (error) {
+    failure(error);
   }
 }
-async function closeAnalysisTab(id: number) {
-  if (analysisTabs.value.length <= 1) return;
-  if (id === activeAnalysisTab.value) {
-    const other = analysisTabs.value.find((item) => item.id !== id)!;
-    await switchAnalysisTab(other.id);
-    if (activeAnalysisTab.value === id) return;
-  }
-  analysisTabs.value = analysisTabs.value.filter((item) => item.id !== id);
-}
+const switchAnalysisTab = analysisTabState.select;
+const closeAnalysisTab = analysisTabState.close;
 async function renameAnalysisTab(id: number) {
   const item = analysisTabs.value.find((item) => item.id === id);
   if (!item) return;
   try {
     const result = await ElMessageBox.prompt(
-      "页签名称（本次记录内临时保留）",
+      "页签名称（本记录内）",
       "重命名分析页签",
       {
         inputValue: item.name,
@@ -972,8 +648,51 @@ async function renameAnalysisTab(id: number) {
           (!!value?.trim() && value.length <= 20) || "请输入 1～20 字名称",
       },
     );
-    item.name = result.value.trim();
+    analysisTabState.rename(id, result.value);
   } catch {}
+}
+async function restoreAnalysisTab(target: AnalysisTab): Promise<boolean> {
+  const place = target.place,
+    id = capture.value?.id;
+  if (!place || place.captureId !== id) return false;
+  pauseListForInteraction("history");
+  detailGate.cancel();
+  detailLoading.value = false;
+  browsingHistory.value = !target.following;
+  await loadMessages(target.following, false, {
+    query: place.query,
+    page: place.page,
+    scrollTop: place.scrollTop,
+    onCommit: () => {
+      applyQuery(place.query);
+      selected.value = undefined;
+      selectedRowIndex.value = undefined;
+      detailOpen.value = false;
+      temporaryView.value = target.temporary;
+    },
+  });
+  if (queryError.value || capture.value?.id !== id) return false;
+  if (place.selectedIndex !== undefined) {
+    try {
+      const row =
+        rows.value.find((item) => item.index === place.selectedIndex) ||
+        (await api<Packet>(
+          `/api/captures/${id}/messages/${place.selectedIndex}`,
+        ));
+      if (capture.value?.id !== id) return false;
+      await selectDetail(row);
+    } catch {
+      ElMessage.info("原选中消息已不在保留范围，已恢复筛选与位置");
+    }
+    detailOpen.value = place.detailOpen;
+    tab.value = place.tab;
+    if (target.field && selected.value) await focusField(target.field);
+  }
+  browsingHistory.value = !target.following;
+  autoFollow.value = target.following;
+  await nextTick();
+  packetTable.value?.setScrollTop(place.scrollTop);
+  return true;
 }
 /** 保留输入草稿；只在查询成功后发布快捷操作及撤销位置。 */
 async function quickQuery(patch: Partial<WorkspaceQuery>) {
@@ -1041,127 +760,6 @@ function overviewSelection(rows: Packet[], action: "only" | "exclude") {
       : { exclude: mergeProtocolExclusions(base.exclude, choices) },
   );
 }
-async function saveCurrentSnapshot() {
-  const source = capture.value;
-  if (!source || snapshotBusy.value) return;
-  try {
-    const result = await ElMessageBox.prompt(
-      "保存当前仍保留的全部消息，源连接继续采集；已淘汰消息不能补回。",
-      "保存此刻",
-      {
-        inputValue: source.name.slice(0, 70) + " · 快照",
-        inputValidator: (value) =>
-          (!!value?.trim() && value.length <= MAX_CAPTURE_NAME_LENGTH) ||
-          "请输入 1～100 字名称",
-      },
-    );
-    snapshotBusy.value = true;
-    savedSnapshot.value = await post<Capture>(
-      `/api/captures/${source.id}/snapshot-current`,
-      { name: result.value },
-    );
-    await reloadCaptures();
-    ElMessage.success("快照已保存，当前阅读位置和源连接保持");
-  } catch (error) {
-    if (error !== "cancel" && error !== "close") failure(error);
-  } finally {
-    snapshotBusy.value = false;
-  }
-}
-async function enableContinuous() {
-  const source = capture.value;
-  if (!source || continuousBusy.value) return;
-  continuousBusy.value = true;
-  try {
-    const result = await post<Capture>(
-      `/api/captures/${source.id}/continuous`,
-      {},
-    );
-    if (capture.value?.id === source.id) capture.value = result;
-    await reloadCaptures();
-    ElMessage.success(
-      "已开始持续保存；内存继续按预算淘汰，磁盘记录可在停止或重启后读取",
-    );
-  } catch (error) {
-    failure(error);
-  } finally {
-    continuousBusy.value = false;
-  }
-}
-async function comparePrevious() {
-  const target = selected.value;
-  const id = capture.value?.id;
-  if (!target || !id || comparingPrevious.value) return;
-  comparingPrevious.value = true;
-  try {
-    const previous = await api<Packet>(
-      `/api/captures/${id}/previous/${target.index}`,
-    );
-    if (capture.value?.id !== id || selected.value?.index !== target.index)
-      return;
-    comparisonBase.value = previous;
-    comparisonDialog.value = true;
-  } catch (error) {
-    failure(error);
-  } finally {
-    comparingPrevious.value = false;
-  }
-}
-async function saveView() {
-  if (!displayedQuery.value) return;
-  try {
-    const result = await ElMessageBox.prompt(
-      "保存已生效筛选与当前列设置；不包含待提交草稿。",
-      "保存常用视图",
-      {
-        inputValidator: (value) =>
-          (!!value?.trim() && value.length <= 40) || "请输入 1～40 字名称",
-      },
-    );
-    const view: SavedView = {
-      name: result.value.trim(),
-      query: {
-        ...displayedQuery.value,
-        connection: "",
-        range: "",
-        messageIndex: "",
-      },
-      columns: { ...columns.value },
-      dictionary: capture.value?.catalog?.sha256 || "",
-    };
-    const next = [
-      view,
-      ...savedViews.value.filter((item) => item.name !== view.name),
-    ].slice(0, 12);
-    if (!writeStored("analyzer.views.v1", next))
-      throw new Error("本机存储不可用，视图未保存");
-    savedViews.value = next;
-    ElMessage.success("视图已保存，不包含连接和区间等记录专属条件");
-  } catch (error) {
-    if (error !== "cancel" && error !== "close") failure(error);
-  }
-}
-async function applyView(view: SavedView) {
-  if (view.dictionary && view.dictionary !== capture.value?.catalog?.sha256) {
-    try {
-      await ElMessageBox.confirm(
-        "此视图来自另一份协议字典，协议 ID 含义可能不同。确认应用？",
-        "字典不同",
-      );
-    } catch {
-      return;
-    }
-  }
-  await quickQuery(view.query);
-  if (!queryError.value) {
-    columns.value = readColumns(JSON.stringify(view.columns));
-    viewDialog.value = false;
-  }
-}
-function deleteView(name: string) {
-  const next = savedViews.value.filter((item) => item.name !== name);
-  if (writeStored("analyzer.views.v1", next)) savedViews.value = next;
-}
 watch(
   [displayedQuery, selectedRowIndex, displayedPage, tab, detailOpen],
   () => {
@@ -1176,7 +774,6 @@ watch(
   },
 );
 
-const importGuideDialog = ref(false);
 const errorText = ref("");
 const autoFollow = ref(true);
 const pauseOnSelect = ref(
@@ -1197,43 +794,6 @@ const protocolWatch = useProtocolWatch(
   () => activity.latest.value,
 );
 const isFollowing = computed(() => autoFollow.value && !browsingHistory.value);
-const retentionSnapshot = shallowRef<Capture>();
-const retentionError = ref("");
-async function refreshRetention() {
-  const id = capture.value?.id;
-  if (!id) return;
-  retentionError.value = "";
-  try {
-    const result = await api<Capture>(`/api/captures/${id}/overview`);
-    if (capture.value?.id === id) retentionSnapshot.value = result;
-  } catch {
-    if (capture.value?.id === id)
-      retentionError.value = "保存范围刷新失败，以下保留上次确认结果";
-  }
-}
-const retentionCapture = computed(() => {
-  const record = capture.value;
-  if (!record) return;
-  const summary =
-    captures.value.find((item) => item.id === record.id) || record;
-  const latest = activity.latest.value;
-  const confirmed =
-    retentionSnapshot.value?.id === record.id
-      ? retentionSnapshot.value
-      : record;
-  return {
-    ...record,
-    ...confirmed,
-    messageCount: summary.messageCount,
-    evictedCount: summary.evictedCount,
-    firstIndex:
-      latest?.captureId === record.id
-        ? latest.firstRetained
-        : summary.firstIndex,
-    lastIndex:
-      latest?.captureId === record.id ? latest.lastIndex : summary.lastIndex,
-  };
-});
 const rawActivity = computed(() =>
   isFollowing.value ? activity.recent.value : activity.unread.value,
 );
@@ -1254,8 +814,6 @@ const pauseDescription = computed(() => {
     )[pauseReason.value] || "正在阅读"
   );
 });
-const emptyReasons = shallowRef<EmptyReason[]>([]);
-const diagnosticTruncated = ref(false);
 const actionFeedback = ref("");
 let actionFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
 function showActionFeedback(message: string) {
@@ -1315,144 +873,9 @@ async function viewActivity(kind: "all" | "first" | "attention") {
 async function removeBlockingFilter(reason: EmptyReason) {
   await quickQuery(relaxFilter(displayedQuery.value || currentQuery(), reason));
 }
-const selectedMissingFromList = computed(
-  () =>
-    !!selected.value &&
-    !rows.value.some((row) => row.index === selected.value!.index),
-);
-const selectedOutsideRetention = computed(
-  () =>
-    !!selected.value &&
-    selected.value.index <
-      (activity.latest.value?.firstRetained ?? capture.value?.firstIndex ?? 0),
-);
-const laterMessages = shallowRef<{
-  count: number;
-  truncated: boolean;
-  latest?: Packet;
-}>();
-const laterError = ref("");
-const laterGate = new RequestGate();
-const detailReturn = shallowRef<{
-  captureId: string;
-  packet: Packet;
-  tab: string;
-  field: string;
-}>();
-let restoringDetailReading = false;
-watch(
-  () => capture.value?.id,
-  () => {
-    laterGate.cancel();
-    laterMessages.value = undefined;
-    detailReturn.value = undefined;
-  },
-);
-watch(
-  () => [
-    selected.value?.index,
-    selected.value?.connection,
-    activity.latest.value?.lastIndex,
-    activity.latest.value?.clearVersion,
-  ],
-  async (next, previous) => {
-    if (
-      !previous ||
-      next[0] !== previous[0] ||
-      next[1] !== previous[1] ||
-      next[3] !== previous[3]
-    )
-      laterMessages.value = undefined;
-    const packet = selected.value,
-      id = capture.value?.id;
-    const request = laterGate.begin();
-    if (
-      !packet ||
-      !id ||
-      !packet.connection ||
-      !packet.direction ||
-      (!packet.protocolName && packet.protocolId === undefined)
-    ) {
-      laterMessages.value = undefined;
-      return;
-    }
-    const params = new URLSearchParams({
-      after: String(packet.index),
-      protocolId:
-        packet.protocolId === undefined ? "" : String(packet.protocolId),
-      protocolName: packet.protocolName || "",
-      connection: packet.connection,
-      direction: packet.direction,
-    });
-    try {
-      const result = await api<{
-        count: number;
-        truncated: boolean;
-        latest?: Packet;
-      }>(`/api/captures/${id}/latest-protocol?${params}`, {
-        signal: request.signal,
-      });
-      if (
-        request.current() &&
-        selected.value === packet &&
-        capture.value?.id === id
-      ) {
-        laterMessages.value = result;
-        laterError.value = "";
-      }
-    } catch (error) {
-      if (request.current()) laterError.value = String(error);
-    }
-  },
-);
-async function restoreDetailReturn() {
-  const place = detailReturn.value;
-  if (!place || place.captureId !== capture.value?.id) return;
-  restoringDetailReading = true;
-  detailGate.cancel();
-  selected.value = place.packet;
-  selectedRowIndex.value = place.packet.index;
-  detailTarget.value = place.packet;
-  detailLoading.value = false;
-  detailError.value = "";
-  detailOpen.value = true;
-  detailReturn.value = undefined;
-  await nextTick();
-  restoringDetailReading = false;
-  tab.value = place.tab;
-  focusedField.value = place.field;
-  if (place.tab === "tree" && place.field) await focusField(place.field, false);
-}
-async function viewLatestProtocol(compare = false) {
-  const next = laterMessages.value?.latest,
-    packet = selected.value,
-    id = capture.value?.id;
-  if (!next || !packet || !id) return;
-  const previous = {
-    captureId: id,
-    packet,
-    tab: tab.value,
-    field: focusedField.value,
-  };
-  if (!detailReturn.value) detailReturn.value = previous;
-  await selectDetail(next);
-  if (capture.value?.id !== id) return;
-  if (!selected.value || selected.value.index !== next.index) {
-    const message = detailError.value;
-    detailReturn.value = previous;
-    await restoreDetailReturn();
-    laterError.value = message || "后续消息已不在保留范围，仍保留原详情";
-    return;
-  }
-  if (compare) {
-    comparisonBase.value = packet;
-    comparisonDialog.value = true;
-  }
-}
 const highlightedRow = ref<number>();
-const recentRows = shallowRef<Set<number>>(new Set());
 let rowHighlightTimer: ReturnType<typeof setTimeout> | undefined;
-let recentRowsTimer: ReturnType<typeof setTimeout> | undefined;
+
 function highlightRow(index: number) {
   highlightedRow.value = index;
   if (rowHighlightTimer) clearTimeout(rowHighlightTimer);
@@ -1461,54 +884,13 @@ function highlightRow(index: number) {
     2200,
   );
 }
-async function locatePinnedMessage() {
-  if (!selected.value) return;
-  if (selectedOutsideRetention.value) {
-    laterError.value = "原消息已不在保留范围，已打开的详情继续保留";
-    return;
-  }
-  pauseListForInteraction("locate");
-  const row = rows.value.find((row) => row.index === selected.value!.index);
-  if (row) {
-    await revealRow(row);
-    return;
-  }
-  await jumpToContext(selected.value, "connection", false);
-}
-const expandedFields = ref<Record<string, boolean>>({});
-const fieldExpansionCache = new Map<string, Record<string, boolean>>();
-watch(
-  () => selected.value && `${capture.value?.id}:${selected.value.index}`,
-  (key) => {
-    if (!key) return;
-    let saved = fieldExpansionCache.get(key);
-    if (!saved) {
-      saved = {};
-      fieldExpansionCache.set(key, saved);
-    }
-    expandedFields.value = saved;
-    if (fieldExpansionCache.size > 8)
-      fieldExpansionCache.delete(fieldExpansionCache.keys().next().value!);
-  },
-);
-function rememberExpansion(value: { path: string; open: boolean }) {
-  if (
-    value.path.length <= 2048 &&
-    (Object.hasOwn(expandedFields.value, value.path) ||
-      Object.keys(expandedFields.value).length < 500)
-  )
-    expandedFields.value[value.path] = value.open;
-}
-
 const browsingHistory = ref(false);
 const viewingTail = ref(false);
 const unread = shallowRef<Record<string, number>>({});
-const appliedSearch = ref("");
 function pauseListForInteraction(reason = "menu") {
   pauseReason.value = reason;
   autoFollow.value = false;
-  pendingLive = false;
-  if (refreshTimer) clearTimeout(refreshTimer);
+  messageLoader.clearDeferred();
   // 不只禁止下次刷新：在菜单打开之前已经发出的请求也不能替换当前行。
   if (loading.value) cancelQuery("");
 }
@@ -1551,6 +933,8 @@ watch(
 );
 // 点选详情和实时未读计数不改变列表内容；避免因此重跑整页单元格和操作菜单。
 const tableRenderDeps = computed(() => [
+  workspaceLayout.widths.value,
+  selectedOperationRange.value,
   foldRepeats.value,
   messageGrouping.value,
   expandedRepeats.value,
@@ -1578,6 +962,7 @@ watch([selectedRowIndex, groupingRows], async () => {
     (item) => item.index === selectedRowIndex.value,
   );
   if (
+    !readingTools.inspecting.value &&
     chosen?.repeatOf !== undefined &&
     !expandedRepeats.value.has(chosen.repeatOf)
   ) {
@@ -1590,174 +975,168 @@ watch([selectedRowIndex, groupingRows], async () => {
     groupingRows.value.find((item) => item.index === selectedRowIndex.value),
   );
 });
-const contextScope = ref<"connection" | "all">("connection");
-const contextAnchor = shallowRef<Packet>();
-interface SearchOrigin {
-  captureId: string;
-  search: string;
-  appliedSearch: string;
-  protocolId: string;
-  messageIndex: string;
-  appliedProtocolId: string;
-  appliedMessageIndex: string;
-  include: string;
-  exclude: string;
-  appliedInclude: string;
-  appliedExclude: string;
-  direction: string;
-  status: string;
-  connection: string;
-  selectedRange: string;
-  hideHeartbeat: boolean;
-  order: string;
-  page: number;
-  scrollTop: number;
-  selectedIndex?: number;
-  tab: string;
-  viewingTail: boolean;
-  query: WorkspaceQuery;
-}
-const searchOrigin = shallowRef<SearchOrigin>();
-const detailQuery = computed(
-  () => displayedQuery.value?.q || searchOrigin.value?.query.q || "",
-);
-const fieldMatches = computed(() =>
-  findFieldMatches(selected.value?.body, detailQuery.value),
-);
-const matchPaths = computed(() =>
-  fieldMatches.value.matches.map((item) => item.path),
-);
-const focusedField = ref("");
-const hasPrevious = computed(
-  () =>
-    !!neighbourPage(
-      displayedPage.value,
-      rows.value.findIndex((item) => item.index === selectedRowIndex.value),
-      rows.value.length,
-      total.value,
-      -1,
-      DEFAULT_PAGE_SIZE,
-      pageOffset.value,
-    ),
-);
-const hasNext = computed(
-  () =>
-    !!neighbourPage(
-      displayedPage.value,
-      rows.value.findIndex((item) => item.index === selectedRowIndex.value),
-      rows.value.length,
-      total.value,
-      1,
-      DEFAULT_PAGE_SIZE,
-      pageOffset.value,
-    ),
-);
-const activeFilters = computed(() => {
-  if (!displayedQuery.value) return [];
-  const q = displayedQuery.value;
-  const result: { key: string; label: string; value?: string }[] = [];
-  if (q.q) result.push({ key: "search", label: `搜索：${q.q}` });
-  if (q.protocolId)
-    result.push({
-      key: "protocolId",
-      label: `协议 ID：${q.protocolId}`,
-    });
-  if (q.messageIndex)
-    result.push({
-      key: "messageIndex",
-      label: `消息序号：${q.messageIndex}`,
-    });
-  for (const [key, text, prefix] of [
-    ["include", q.include, "仅看"],
-    ["exclude", q.exclude, "排除"],
-  ]) {
-    for (const value of text.split(/[,，\s]+/).filter(Boolean))
-      result.push({ key, label: `${prefix}：${value}`, value });
-  }
-  if (q.direction)
-    result.push({ key: "direction", label: `方向：${q.direction}` });
-  if (q.status)
-    result.push({
-      key: "status",
-      label: `状态：${statusText[q.status] || q.status}`,
-    });
-  if (q.connection)
-    result.push({
-      key: "connection",
-      label: `连接：${q.connection.slice(0, 8)}`,
-    });
-  if (q.range && !q.range.startsWith("recent:"))
-    result.push({
-      key: "range",
-      label: `区间：${readingRange(q.range, capture.value?.marks || [])?.name || q.range}`,
-    });
-  if (q.hideHeartbeat) result.push({ key: "heartbeat", label: "隐藏心跳" });
-  return result;
-});
-const visibleFilters = computed(() =>
-  expandedTags.value ? activeFilters.value : activeFilters.value.slice(0, 3),
-);
-function currentQuery(): WorkspaceQuery {
-  return {
-    q: appliedSearch.value,
-    protocolId: appliedProtocolId.value,
-    messageIndex: appliedMessageIndex.value,
-    include: appliedInclude.value,
-    exclude: appliedExclude.value,
-    direction: direction.value,
-    status: status.value,
-    connection: connection.value,
-    hideHeartbeat: hideHeartbeat.value,
-    order: order.value,
-    range: selectedRange.value,
-  };
-}
-function applyQuery(q: WorkspaceQuery) {
-  search.value = appliedSearch.value = q.q;
-  protocolId.value = appliedProtocolId.value = q.protocolId;
-  messageIndex.value = appliedMessageIndex.value = q.messageIndex;
-  include.value = appliedInclude.value = q.include;
-  exclude.value = appliedExclude.value = q.exclude;
-  direction.value = q.direction;
-  status.value = q.status;
-  connection.value = q.connection;
-  hideHeartbeat.value = q.hideHeartbeat;
-  order.value = q.order;
-  selectedRange.value = q.range;
-}
 const activityWindow = useActivityWindow(
   () => capture.value,
   () => rawActivity.value,
   () => displayedQuery.value || currentQuery(),
   () => activity.latest.value,
   () => !!health.value.activityWindow,
+  () =>
+    isFollowing.value
+      ? "following"
+      : `unread:${activity.baseline.value?.lastIndex ?? -1}`,
 );
-function cancelQuery(message = "已取消本次查询，保留上次成功结果") {
-  messageGate.cancel();
-  queryPublication.cancel();
-  loading.value = false;
-  interactiveLoading.value = false;
-  pendingQuery.value = undefined;
-  queryError.value = message;
-}
-async function resetLayout() {
-  const top = tableScrollTop();
-  columns.value = { ...defaultColumns };
-  detailDock.value = "auto";
-  sidebarCollapsed.value = true;
-  focusMode.value = false;
-  expandedTags.value = false;
-  for (const direction of ["horizontal", "vertical"])
-    localStorage.removeItem(`analyzer.split.${direction}.v3`);
-  splitPane.value?.reset();
-  tableRevision.value++;
-  await nextTick();
-  packetTable.value?.setCurrentRow(
-    rows.value.find((item) => item.index === selectedRowIndex.value),
-  );
-  packetTable.value?.setScrollTop(top);
-  ElMessage.success("已恢复默认布局，消息、查询条件和选中行已保留");
-}
+const analysisProject = useAnalysisProject({
+  capture,
+  reloadCaptures,
+  openCapture,
+  failure,
+  enabled: () => !!health.value.analysisProjects && !!displayedQuery.value,
+  document: () => ({
+    notes: research.notes.value,
+    columns: research.columns.value,
+    widths: workspaceLayout.widths.value,
+    views: analysisTabs.value.map((item) => ({
+      name: item.name,
+      query: item.place?.query || displayedQuery.value || currentQuery(),
+    })),
+  }),
+  apply: (document) => {
+    research.hydrate(document);
+    workspaceLayout.widths.value = document.widths;
+    const safe = document.views.filter(
+      (item): item is { name: string; query: WorkspaceQuery } =>
+        !!item &&
+        typeof item === "object" &&
+        "name" in item &&
+        typeof item.name === "string" &&
+        "query" in item &&
+        validQuery(item.query),
+    );
+    // 恢复保存的视图，但不自动执行查询或抢走当前详情；用户点击页签才应用。
+    const place = readingPlace();
+    if (place && safe.length) {
+      analysisTabs.value = safe.slice(0, 5).map((item, index) => ({
+        id: Date.now() + index,
+        name: item.name,
+        following: false,
+        field: "",
+        place: {
+          ...place,
+          query: item.query,
+          page: 1,
+          scrollTop: 0,
+          selectedIndex: undefined,
+          detailOpen: false,
+        },
+      }));
+      activeAnalysisTab.value = analysisTabs.value[0].id;
+    }
+  },
+});
+
+const { projectSync, projectInput, importAnalysisProject } = analysisProject;
+
+const messageLoader = useMessageLoader({
+  capture,
+  query: queryResults,
+  filters,
+  activity,
+  supportsAnalysis: () => supportsAnalysis.value,
+  fieldColumns: () => research.columns.value,
+  grouping: () => messageGrouping.value,
+  autoFollow,
+  browsingHistory,
+  viewingTail,
+  unread,
+  table: () => packetTable.value,
+  revealRow,
+});
+const {
+  loadMessages,
+  cancelQuery,
+  retryMessages,
+  loading,
+  interactiveLoading,
+  jumpTarget,
+  recentRows,
+  emptyReasons,
+  diagnosticTruncated,
+} = messageLoader;
+
+const messageHistory = useMessageHistory({
+  capture,
+  query: queryResults,
+  filters,
+  loader: messageLoader,
+  selection,
+  tab,
+  autoFollow,
+  browsingHistory,
+  viewingTail,
+  temporaryView,
+  locatedRow,
+  saveNavigationCheckpoint,
+  tableScrollTop,
+  revealRow,
+  pauseHistory,
+  pauseListForInteraction,
+  clearBatch: () => {
+    rowActions.value?.close();
+    batchExcluding.value = false;
+    selectedProtocols.value = [];
+  },
+});
+const {
+  contextScope,
+  contextAnchor,
+  searchOrigin,
+  hasPrevious,
+  hasNext,
+  jumpToContext,
+  returnToSearch,
+  changePage,
+  browseHistory,
+  jumpLatest,
+  loadLatestMessages,
+  neighbour,
+} = messageHistory;
+const inspector = useMessageInspector({
+  selection,
+  tab,
+  captureId: () => capture.value?.id,
+  listQuery: () => displayedQuery.value?.q || searchOrigin.value?.query.q || "",
+  restoring: () => restoringDetailReading.value,
+});
+const { detailQuery, focusedField, focusField } = inspector;
+const relations = useMessageRelations({
+  capture,
+  selection,
+  inspector,
+  activity,
+  rows,
+  visibleRows: () => visibleRows.value,
+  pauseListForInteraction,
+  revealRow,
+  jumpToContext,
+  failure,
+});
+const {
+  comparisonBase,
+  comparisonDialog,
+  comparingPrevious,
+  selectedMissingFromList,
+  selectedOutsideRetention,
+  laterMessages,
+  laterError,
+  detailReturn,
+  restoringDetailReading,
+  restoreDetailReturn,
+  viewLatestProtocol,
+  locatePinnedMessage,
+  comparePrevious,
+  setComparisonBase,
+} = relations;
 function handleWorkspaceKey(event: KeyboardEvent) {
   if (mainWorkspace.value !== "captures") return;
   const target = event.target as HTMLElement | null;
@@ -1788,7 +1167,9 @@ function handleWorkspaceKey(event: KeyboardEvent) {
   )
     return;
   if (event.key === "Escape") {
-    if (focusMode.value) focusMode.value = false;
+    if (workspaceLayout.maximized.value) {
+      void toggleDetailMaximize();
+    } else if (focusMode.value) focusMode.value = false;
     else if (detailVisible.value) detailOpen.value = false;
     else return;
   } else {
@@ -1876,58 +1257,7 @@ async function revealRow(target: Packet) {
         (viewport.clientHeight - row.offsetHeight) / 2,
     );
 }
-async function focusField(path: string, expandAncestors = true) {
-  const target = selected.value;
-  focusedField.value = "";
-  await nextTick();
-  if (selected.value !== target) return;
-  if (expandAncestors) {
-    rememberExpansion({ path: "", open: true });
-    let parent = "";
-    for (const part of path.split("/").slice(1, -1)) {
-      parent += "/" + part;
-      rememberExpansion({ path: parent, open: true });
-    }
-  }
-  focusedField.value = path;
-  tab.value = "tree";
-  await nextTick();
-  const node = Array.from(
-    document.querySelectorAll<HTMLElement>(".detail-panel [data-json-path]"),
-  ).find((item) => item.dataset.jsonPath === path);
-  node?.scrollIntoView({ block: "center", inline: "nearest" });
-}
-watch([selected, detailQuery], async () => {
-  if (restoringDetailReading) return;
-  focusedField.value = fieldMatches.value.matches[0]?.path || "";
-  if (focusedField.value && tab.value === "tree")
-    await focusField(focusedField.value);
-});
-function setComparisonBase() {
-  if (!selected.value) return;
-  comparisonBase.value = selected.value;
-  ElMessage.success(
-    `已固定消息 #${selected.value.index}，选择另一条消息后点击“对比变化”`,
-  );
-}
-let listReloading = false;
-let pendingLive = false;
-let refreshTimer: ReturnType<typeof setTimeout> | undefined;
-const bodyText = computed(() => pretty(selected.value?.body));
-const packetHexText = computed(() => hex(selected.value?.packetHex));
-const wireHexText = computed(() => hex(selected.value?.wireHex));
-const detailMetadata = computed(() => {
-  if (!selected.value) return {};
-  const { body, schema, packetHex, wireHex, ...metadata } = selected.value;
-  return metadata;
-});
-const statusText: Record<string, string> = {
-  [DecodeStatus.DECODED]: "已解码",
-  [DecodeStatus.PARTIAL]: "部分解码",
-  [DecodeStatus.FAILED]: "解码失败",
-  [DecodeStatus.UNMAPPED]: "未映射",
-  [ATTENTION_STATUS]: "需关注（部分 / 失败 / 未映射）",
-};
+
 function failure(error: unknown) {
   errorText.value = error instanceof Error ? error.message : String(error);
   ElMessage.error(errorText.value);
@@ -1943,289 +1273,34 @@ watch(
 async function reloadCaptures() {
   captures.value = await api<Capture[]>("/api/captures");
 }
-async function refreshLive(
-  connections: CaptureProgress[],
-  changedIds: string[],
-) {
-  try {
-    const known = new Set(captures.value.map((item) => item.id));
-    // 只有新连接或连接结束时才重新读取记录目录；普通消息只更新已有摘要。
-    if (
-      !listReloading &&
-      changedIds.some(
-        (id) =>
-          !known.has(id) || !connections.some((item) => item.captureId === id),
-      )
-    ) {
-      listReloading = true;
-      try {
-        await reloadCaptures();
-      } finally {
-        listReloading = false;
-      }
-    }
-    const progress = new Map(connections.map((item) => [item.captureId, item]));
-    const nextUnread = { ...unread.value };
-    captures.value = captures.value.map((item) => {
-      const current = progress.get(item.id);
-      if (
-        !current ||
-        (current.messages === (item.totalReceived ?? item.messageCount) &&
-          (current.clearVersion || 0) === (item.clearVersion || 0) &&
-          JSON.stringify(current.connectionInfo || {}) ===
-            JSON.stringify(item.connections[0] || {}))
-      )
-        return item;
-      nextUnread[item.id] = shouldCountUnread(
-        capture.value?.id,
-        item.id,
-        autoFollow.value,
-        browsingHistory.value,
-      )
-        ? (nextUnread[item.id] || 0) +
-          Math.max(
-            0,
-            current.messages - (item.totalReceived ?? item.messageCount),
-          )
-        : 0;
-      return {
-        ...item,
-        connections: current.connectionInfo
-          ? [current.connectionInfo]
-          : item.connections,
-        totalReceived: current.messages,
-        clearVersion: current.clearVersion || 0,
-        clearedCount: current.clearedCount || 0,
-        messageCount:
-          current.retainedMessages ??
-          Math.min(current.messages, item.maxMessages || current.messages),
-        evictedCount: current.evictedCount ?? item.evictedCount,
-      };
-    });
-    unread.value = nextUnread;
-    const activeSummary = captures.value.find(
-      (item) => item.id === capture.value?.id,
-    );
-    if (activeSummary && capture.value) {
-      capture.value = {
-        ...capture.value,
-        connections: activeSummary.connections,
-      };
-    }
-    const activeId = capture.value?.id;
-    if (
-      activeId &&
-      changedIds.includes(activeId) &&
-      (!autoFollow.value || browsingHistory.value)
-    )
-      void activity.refresh();
-    if (
-      activeId &&
-      capture.value?.diskFirstIndex !== undefined &&
-      changedIds.includes(activeId) &&
-      !autoFollow.value
-    ) {
-      const metadata = await api<Capture>(`/api/captures/${activeId}/overview`);
-      if (capture.value?.id === activeId) capture.value = metadata;
-    }
-    if (
-      shouldRefreshMessages(
-        capture.value?.id,
-        changedIds,
-        autoFollow.value,
-        browsingHistory.value,
-      )
-    ) {
-      if (loading.value) pendingLive = true;
-      else await loadMessages(true, true);
-    }
-  } catch (error) {
-    failure(error);
-  }
-}
-async function openLiveCapture(id: string) {
-  let item = captures.value.find((value) => value.id === id);
-  if (!item) {
-    await reloadCaptures();
-    item = captures.value.find((value) => value.id === id);
-  }
-  if (item) await openCapture(item);
-}
-interface MessageNavigation {
-  position?: number;
-  index?: number;
-  scrollTop?: number;
-  query?: WorkspaceQuery;
-  page?: number;
-  onCommit?: () => void;
-}
-const retryAction = shallowRef<() => Promise<void>>();
-function retryMessages() {
-  void retryAction.value?.();
-}
-async function loadMessages(
-  tail = false,
-  background = false,
-  navigation?: MessageNavigation,
-): Promise<void> {
-  if (!capture.value) return;
-  const id = capture.value.id;
-  const query = {
-    ...(navigation?.query || displayedQuery.value || currentQuery()),
-  };
-  const requestedPage = navigation?.page ?? page.value;
-  const request = messageGate.begin();
-  const publication = queryPublication.begin();
-  loading.value = true;
-  interactiveLoading.value = !background;
-  pendingQuery.value = query;
-  queryError.value = "";
-  retryAction.value = async () => {
-    if (capture.value?.id === id)
-      await loadMessages(tail, false, {
-        ...navigation,
-        query,
-        page: requestedPage,
-      });
-  };
-  const timer = setTimeout(() => {
-    if (request.current())
-      cancelQuery("查询超过 30 秒，已停止等待；保留上次结果，可重试");
-  }, MESSAGE_REQUEST_TIMEOUT_MS);
-  const params = new URLSearchParams({
-    q: query.q,
-    protocolId: query.protocolId,
-    messageIndex: query.messageIndex,
-    order: query.order,
-    include: query.include,
-    exclude: query.exclude,
-    direction: query.direction,
-    status: query.status,
-    connection: query.connection,
-    hideHeartbeat: String(query.hideHeartbeat),
-    offset: String((requestedPage - 1) * DEFAULT_PAGE_SIZE),
-    limit: String(DEFAULT_PAGE_SIZE),
-    tail: String(tail),
-    ...(supportsAnalysis.value
-      ? {
-          fields: JSON.stringify(
-            research.columns.value.map((field) => field.path),
-          ),
-          fold: String(messageGrouping.value === "content"),
-        }
-      : {}),
-  });
-  if (query.range) {
-    const mark = readingRange(query.range, capture.value.marks);
-    if (!mark) {
-      cancelQuery("当前区间已不可用，请取消区间限制后重试");
-      return;
-    }
-    if (mark) {
-      params.set("from", String(mark.from));
-      params.set("to", String(mark.to));
-    }
-  }
-  try {
-    const result = await api<Page>(`/api/captures/${id}/messages?${params}`, {
-      signal: request.signal,
-    });
-    if (
-      !Array.isArray(result.items) ||
-      result.capture?.id !== id ||
-      !Number.isInteger(result.total) ||
-      result.total < 0
-    )
-      throw new Error("查询结果格式异常，旧结果已保留");
-    if (
-      !request.current() ||
-      capture.value?.id !== id ||
-      !queryPublication.commit(publication, { query, result })
-    )
-      return;
-    // 条件、计数、页码和数据在同一次同步发布中更新，失败与取消不会发布半套状态。
-    navigation?.onCommit?.();
-    displayedQuery.value = query;
-    const previousLast = rows.value.reduce(
-      (last, row) => Math.max(last, row.index),
-      -1,
-    );
-    if (background && previousLast >= 0) {
-      recentRows.value = new Set(
-        result.items
-          .filter((row) => row.index > previousLast)
-          .slice(0, 20)
-          .map((row) => row.index),
-      );
-      if (recentRowsTimer) clearTimeout(recentRowsTimer);
-      recentRowsTimer = setTimeout(() => (recentRows.value = new Set()), 1800);
-    }
-    rows.value = reconcileRows(rows.value, result.items);
-    emptyReasons.value = result.emptyReasons || [];
-    diagnosticTruncated.value = !!result.diagnosticTruncated;
-    activity.publish(
-      result.activity,
-      tail && autoFollow.value && !browsingHistory.value,
-    );
-    total.value = result.total;
-    pageOffset.value = result.offset ?? (requestedPage - 1) * DEFAULT_PAGE_SIZE;
-    displayedPage.value = Math.floor(pageOffset.value / DEFAULT_PAGE_SIZE) + 1;
-    page.value = displayedPage.value;
-    displayedAt.value = new Date().toLocaleTimeString();
-    capture.value = result.capture;
-    viewingTail.value = tail;
-    queryMetrics.value = {
-      queryMs: result.queryMs || 0,
-      lockWaitMs: result.lockWaitMs || 0,
-      snapshotMs: result.snapshotMs || 0,
-    };
-    if (navigation?.position !== undefined) {
-      const target =
-        navigation.position < 0
-          ? rows.value.at(-1)
-          : rows.value[navigation.position];
-      if (target) await revealRow(target);
-    } else if (
-      navigation?.index !== undefined ||
-      jumpTarget.value !== undefined
-    ) {
-      const index = navigation?.index ?? jumpTarget.value;
-      const target = result.items.find((item) => item.index === index);
-      jumpTarget.value = undefined;
-      if (target) await revealRow(target);
-      else ElMessage.warning("目标消息已不在当前列表中，可能已被清空或淘汰");
-    }
-    if (!request.current() || capture.value?.id !== id) return;
-    if (navigation?.scrollTop !== undefined) {
-      await nextTick();
-      if (request.current())
-        packetTable.value?.setScrollTop(navigation.scrollTop);
-    }
-    unread.value = { ...unread.value, [id]: 0 };
-  } catch (error) {
-    if (request.current())
-      queryError.value = `本次查询未应用：${error instanceof Error ? error.message : String(error)}。${displayedQuery.value ? "下方保留上次成功结果" : "请重试载入"}`;
-  } finally {
-    clearTimeout(timer);
-    if (request.current()) {
-      loading.value = false;
-      interactiveLoading.value = false;
-      pendingQuery.value = undefined;
-      if (pendingLive) {
-        pendingLive = false;
-        refreshTimer = setTimeout(() => {
-          if (
-            capture.value?.id === id &&
-            autoFollow.value &&
-            !browsingHistory.value
-          )
-            void loadMessages(true, true);
-        }, 500);
-      }
-    }
-  }
-}
+const captureFeed = useCaptureFeed({
+  capture,
+  captures,
+  unread,
+  autoFollow,
+  browsingHistory,
+  loader: messageLoader,
+  activity,
+  reloadCaptures,
+  openCapture,
+  failure,
+});
+const { refreshLive, openLiveCapture } = captureFeed;
 async function openCapture(item: Capture, restore?: ReadingPlace) {
+  if (
+    capture.value &&
+    capture.value.id !== item.id &&
+    health.value.analysisProjects &&
+    projectSync.ready.value
+  ) {
+    try {
+      await nextTick();
+      await projectSync.flush();
+    } catch (error) {
+      failure(error);
+      return;
+    }
+  }
   if (!item.id) {
     failure(new Error(item.error || "记录不可用"));
     return;
@@ -2244,8 +1319,7 @@ async function openCapture(item: Capture, restore?: ReadingPlace) {
   detailLoading.value = false;
   detailTarget.value = undefined;
   contextAnchor.value = undefined;
-  if (refreshTimer) clearTimeout(refreshTimer);
-  pendingLive = false;
+  messageLoader.clearDeferred();
   jumpTarget.value = undefined;
   searchOrigin.value = undefined;
   locatedRow.value = undefined;
@@ -2333,6 +1407,7 @@ async function openCapture(item: Capture, restore?: ReadingPlace) {
   }
 }
 function filter() {
+  searchHistory.value?.record();
   pauseListForInteraction("filter");
   actionFeedback.value = "";
   undoPlace.value = undefined;
@@ -2350,209 +1425,6 @@ function filter() {
   autoFollow.value = false;
   void loadMessages(false, false, { query: currentQuery(), page: 1 });
 }
-async function jumpToContext(
-  row: Packet,
-  scope: "connection" | "all" = contextScope.value,
-  hideContextHeartbeat?: boolean,
-): Promise<void> {
-  if (!capture.value) return;
-  const id = capture.value.id;
-  const shown = displayedQuery.value || currentQuery();
-  const origin: SearchOrigin = {
-    captureId: id,
-    search: search.value,
-    appliedSearch: shown.q,
-    protocolId: protocolId.value,
-    messageIndex: messageIndex.value,
-    appliedProtocolId: shown.protocolId,
-    appliedMessageIndex: shown.messageIndex,
-    include: include.value,
-    exclude: exclude.value,
-    appliedInclude: shown.include,
-    appliedExclude: shown.exclude,
-    direction: shown.direction,
-    status: shown.status,
-    connection: shown.connection,
-    selectedRange: shown.range,
-    hideHeartbeat: shown.hideHeartbeat,
-    order: shown.order,
-    page: displayedPage.value,
-    scrollTop: tableScrollTop(),
-    selectedIndex: row.index,
-    tab: tab.value,
-    viewingTail: viewingTail.value,
-    query: { ...shown },
-  };
-  const query = contextQuery(
-    shown,
-    scope === "connection" ? row.connection : "",
-  );
-  if (hideContextHeartbeat !== undefined)
-    query.hideHeartbeat = hideContextHeartbeat;
-  // 已经处于同一上下文页时直接定位，避免再次查排名、重载列表和丢失滚动位置。
-  if (
-    Object.entries(query).every(
-      ([key, value]) => shown[key as keyof WorkspaceQuery] === value,
-    ) &&
-    rows.value.some((item) => item.index === row.index)
-  ) {
-    if (loading.value) cancelQuery("");
-    contextAnchor.value = row;
-    contextScope.value = scope;
-    await revealRow(row);
-    return;
-  }
-  const request = messageGate.begin();
-  queryPublication.cancel();
-  loading.value = true;
-  interactiveLoading.value = true;
-  pendingQuery.value = query;
-  queryError.value = "";
-  browsingHistory.value = true;
-  autoFollow.value = false;
-  retryAction.value = () => jumpToContext(row, scope, hideContextHeartbeat);
-  const timer = setTimeout(() => {
-    if (request.current()) cancelQuery("上下文定位超时，已保留原结果，可重试");
-  }, DETAIL_REQUEST_TIMEOUT_MS);
-  try {
-    const preceding = await api<Page>(
-      `/api/captures/${id}/messages?${contextRankParams(query, row.index)}`,
-      { signal: request.signal },
-    );
-    if (!request.current() || capture.value?.id !== id) return;
-    if (
-      preceding.total === 0 ||
-      row.index < (preceding.capture.firstIndex || 0)
-    ) {
-      queryError.value = "目标消息已被清空或淘汰，原搜索结果已保留";
-      return;
-    }
-    await loadMessages(false, false, {
-      index: row.index,
-      query,
-      page: pageContaining(preceding.total),
-      onCommit: () => {
-        if (!searchOrigin.value) searchOrigin.value = origin;
-        contextAnchor.value = row;
-        contextScope.value = scope;
-        applyQuery(query);
-      },
-    });
-  } catch (error) {
-    if (request.current())
-      queryError.value = `上下文跳转未应用：${error instanceof Error ? error.message : String(error)}`;
-  } finally {
-    clearTimeout(timer);
-    if (request.current()) {
-      loading.value = false;
-      interactiveLoading.value = false;
-      pendingQuery.value = undefined;
-    }
-  }
-}
-async function returnToSearch(): Promise<void> {
-  const origin = searchOrigin.value;
-  if (!origin || capture.value?.id !== origin.captureId) return;
-  autoFollow.value = false;
-  browsingHistory.value = true;
-  await loadMessages(origin.viewingTail, false, {
-    query: origin.query,
-    page: origin.page,
-    index: origin.selectedIndex,
-    scrollTop: origin.scrollTop,
-    onCommit: () => {
-      applyQuery(origin.query);
-      search.value = origin.search;
-      protocolId.value = origin.protocolId;
-      messageIndex.value = origin.messageIndex;
-      include.value = origin.include;
-      exclude.value = origin.exclude;
-      tab.value = origin.tab;
-      searchOrigin.value = undefined;
-      contextAnchor.value = undefined;
-      jumpTarget.value = undefined;
-    },
-  });
-}
-function changePage(value: number) {
-  pauseHistory();
-  if (value === displayedPage.value && !loading.value) return;
-  jumpTarget.value = undefined;
-  locatedRow.value = undefined;
-  browsingHistory.value = true;
-  page.value = value;
-  void loadMessages();
-}
-function browseHistory() {
-  pauseHistory();
-  browsingHistory.value = true;
-  page.value =
-    (displayedQuery.value?.order || order.value) === "desc"
-      ? 1
-      : Math.max(1, Math.ceil(total.value / DEFAULT_PAGE_SIZE));
-  void loadMessages();
-}
-function jumpLatest() {
-  rowActions.value?.close();
-  batchExcluding.value = false;
-  selectedProtocols.value = [];
-  browsingHistory.value = false;
-  if (!autoFollow.value) autoFollow.value = true;
-  else void loadLatestMessages();
-}
-function loadLatestMessages() {
-  const query = exitTemporaryQuery(
-    displayedQuery.value || currentQuery(),
-    temporaryView.value?.origin,
-    temporaryView.value?.applied,
-  );
-  return loadMessages(true, false, {
-    query,
-    onCommit: () => {
-      applyQuery(query);
-      temporaryView.value = undefined;
-    },
-  });
-}
-function captureName(item: Capture) {
-  if (
-    item.connections.length === 1 &&
-    (item.connections[0].note || item.connections[0].identity)
-  ) {
-    return connectionLabel(item.connections[0]);
-  }
-  return item.name.startsWith("实时 · ")
-    ? "实时 · " + (item.connections[0]?.id.slice(0, 8) || item.id.slice(0, 8))
-    : item.name;
-}
-async function neighbour(delta: number) {
-  if (interactiveLoading.value) return;
-  const index = rows.value.findIndex(
-    (item) => item.index === selectedRowIndex.value,
-  );
-  const next = neighbourPage(
-    displayedPage.value,
-    index,
-    rows.value.length,
-    total.value,
-    delta,
-    DEFAULT_PAGE_SIZE,
-    pageOffset.value,
-  );
-  if (!next) return;
-  pauseListForInteraction("history");
-  browsingHistory.value = true;
-  autoFollow.value = false;
-  if (index + delta >= 0 && index + delta < rows.value.length) {
-    const row = rows.value[index + delta];
-    if (row) {
-      await revealRow(row);
-      return;
-    }
-  }
-  page.value = next.page;
-  await loadMessages(false, false, { position: next.position });
-}
 const navigatingSearchResult = computed(
   () =>
     !!(
@@ -2561,10 +1433,14 @@ const navigatingSearchResult = computed(
       displayedQuery.value?.messageIndex
     ),
 );
-function openProtocol(row: Packet) {
+function openProtocol(row: Packet, event?: MouseEvent) {
+  if (event?.shiftKey) {
+    void tableRowClick(row, undefined, event);
+    return;
+  }
   // 搜索命中仍可一键跳转上下文；日常浏览直接读详情，不额外查询整页。
   if (navigatingSearchResult.value) void jumpToContext(row);
-  else void select(row);
+  else void tableRowClick(row, undefined, event || new MouseEvent("click"));
 }
 async function select(row: Packet | undefined) {
   if (!row || !capture.value) return;
@@ -2572,7 +1448,7 @@ async function select(row: Packet | undefined) {
   await selectDetail(row);
 }
 watch(autoFollow, (value) => {
-  if (switchingAnalysisTab) return;
+  if (switchingAnalysisTab.value || restoringNavigation.value) return;
   if (value) {
     rowActions.value?.close();
     batchExcluding.value = false;
@@ -2588,156 +1464,25 @@ watch(autoFollow, (value) => {
 });
 onBeforeUnmount(() => {
   saveReadingPlace();
-  laterGate.cancel();
+
   if (actionFeedbackTimer) clearTimeout(actionFeedbackTimer);
   if (rowHighlightTimer) clearTimeout(rowHighlightTimer);
-  if (recentRowsTimer) clearTimeout(recentRowsTimer);
+
   window.removeEventListener("beforeunload", saveReadingPlace);
-  window.removeEventListener("resize", measureWorkspace);
+
   window.removeEventListener("keydown", handleWorkspaceKey);
-  regionObserver?.disconnect();
+
   messageGate.cancel();
   detailGate.cancel();
-  if (refreshTimer) clearTimeout(refreshTimer);
+  messageLoader.clearDeferred();
 });
-async function imported(item: Capture) {
+async function captureImported(item: Capture) {
   await reloadCaptures();
   await openCapture(item);
-  ElMessage.success(
-    `已导入 ${item.messageCount} 条消息，已解码 ${item.counts.DECODED || 0} 条`,
-  );
-}
-async function importPath() {
-  if (!localPath.value.trim() || busy.value) return;
-  busy.value = true;
-  errorText.value = "";
-  try {
-    await imported(
-      await post<Capture>("/api/import/path", { path: localPath.value.trim() }),
-    );
-  } catch (error) {
-    failure(error);
-  } finally {
-    busy.value = false;
-  }
-}
-async function upload(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  if (!file || busy.value) return;
-  if (file.size > MAX_UPLOAD_BYTES) {
-    failure(new Error("文件超过 128 MiB"));
-    input.value = "";
-    return;
-  }
-  busy.value = true;
-  errorText.value = "";
-  try {
-    await imported(
-      await api<Capture>(
-        "/api/import/saz?name=" + encodeURIComponent(file.name),
-        { method: "POST", body: file },
-      ),
-    );
-  } catch (error) {
-    failure(error);
-  } finally {
-    busy.value = false;
-    input.value = "";
-  }
-}
-async function mark() {
-  if (!capture.value || busy.value) return;
-  const id = capture.value.id;
-  busy.value = true;
-  try {
-    const marked = await post<Capture>(
-      `/api/captures/${id}/marks`,
-      operation.value,
-    );
-    if (capture.value?.id === id) {
-      capture.value = marked;
-      operationStart.value = undefined;
-      await quickQuery({ range: String(marked.marks.length) });
-    }
-    markDialog.value = false;
-    await reloadCaptures();
-  } catch (error) {
-    failure(error);
-  } finally {
-    busy.value = false;
-  }
-}
-function openMark() {
-  operation.value = {
-    name: "",
-    context: "",
-    from: selected.value?.index ?? capture.value?.firstIndex ?? 0,
-    to:
-      selected.value?.index ??
-      capture.value?.lastIndex ??
-      Math.max(0, (capture.value?.messageCount || 1) - 1),
-  };
-  markDialog.value = true;
-}
-async function exportCapture() {
-  if (!capture.value) return;
-  try {
-    const data = await api(`/api/captures/${capture.value.id}/export`);
-    const url = URL.createObjectURL(
-      new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }),
-    );
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = capture.value.name.replace(/\.saz$/i, "") + "-decoded.json";
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  } catch (error) {
-    failure(error);
-  }
-}
-function pretty(value: unknown) {
-  return JSON.stringify(value, null, 2) ?? "";
-}
-function hex(value?: string) {
-  const bytes = (value || "").match(/.{2}/g) || [];
-  const lines: string[] = [];
-  for (let index = 0; index < bytes.length; index += 16)
-    lines.push(
-      index.toString(16).padStart(8, "0") +
-        "  " +
-        bytes
-          .slice(index, index + 16)
-          .join(" ")
-          .toUpperCase(),
-    );
-  return lines.join("\n");
-}
-function time(value: string) {
-  if (!value) return "未知";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? value
-    : date.toLocaleTimeString("zh-CN", {
-        hour12: false,
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        fractionalSecondDigits: 3,
-      });
-}
-const detailCopy = useInlineCopy();
-watch(selected, detailCopy.reset);
-async function copy() {
-  await detailCopy.copy(pretty(selected.value?.body ?? selected.value));
 }
 onMounted(async () => {
   window.addEventListener("beforeunload", saveReadingPlace);
-  window.addEventListener("resize", measureWorkspace);
   window.addEventListener("keydown", handleWorkspaceKey);
-  regionObserver = new ResizeObserver(() => measureWorkspace());
-  if (dataRegion.value) regionObserver.observe(dataRegion.value);
-  measureWorkspace();
   try {
     health.value = await api("/api/health");
     settings.value = await api("/api/settings");
@@ -2768,82 +1513,16 @@ onMounted(async () => {
     class="workbench"
     :class="{ 'focus-mode': focusMode && mainWorkspace === 'captures' }"
   >
-    <header class="topbar">
-      <div class="brand">
-        <span class="brand-icon">⇄</span>
-        <div>ProtoLens<small>游戏协议分析工作台</small></div>
-      </div>
-      <span class="divider"></span>
-      <span class="state-dot" :class="{ online: health.ready }"></span
-      ><span class="muted">{{
-        health.ready ? "本机服务已连接" : "连接后端中"
-      }}</span>
-      <el-tag size="small" effect="plain">Thrift Compact</el-tag>
-      <el-button
-        text
-        :type="mainWorkspace === 'captures' ? 'primary' : 'default'"
-        @click="returnCaptureWorkspace"
-        >抓包分析</el-button
-      >
-      <el-button
-        text
-        :type="mainWorkspace === 'catalog' ? 'primary' : 'default'"
-        @click="openProtocolQuery()"
-        >协议查询 ·
-        {{ health.catalog.messageCount.toLocaleString() }} 条</el-button
-      >
-      <span
-        v-if="settings.serverPort"
-        class="muted"
-        :title="settings.configFile"
-        >后端 :{{ settings.serverPort }} · 页面 :{{ settings.frontendPort }} ·
-        代理 :{{ settings.collectorPort }}</span
-      >
-      <div class="topbar-right">
-        <AiAnalysisPanel
-          :capture="capture"
-          :selected-index="selectedRowIndex"
-        />
-        <el-button text @click="openSettings">设置 / 协议加载</el-button>
-        <el-dropdown trigger="click"
-          ><el-button text>更多</el-button
-          ><template #dropdown
-            ><el-dropdown-menu
-              ><el-dropdown-item @click="checkUpdate">检查更新</el-dropdown-item
-              ><el-dropdown-item @click="importGuideDialog = true"
-                >SAZ 导入说明</el-dropdown-item
-              ></el-dropdown-menu
-            ></template
-          ></el-dropdown
-        >
-        <!-- 安装包交给浏览器原生下载；fetch 会被同源 CSP 拦截，并额外受跨域读取限制。 -->
-        <el-button
-          v-if="update.available && update.downloadUrl"
-          tag="a"
-          text
-          :href="update.downloadUrl"
-          target="_blank"
-          rel="noopener noreferrer"
-          title="由浏览器下载；进度请查看浏览器下载列表，失败时可打开发版页面"
-          >下载 {{ update.latestVersion }}</el-button
-        >
-        <el-button
-          v-if="update.available && update.releaseUrl"
-          tag="a"
-          text
-          :href="update.releaseUrl"
-          target="_blank"
-          rel="noopener noreferrer"
-          >发版页面</el-button
-        >
-        <el-switch
-          v-model="dark"
-          inline-prompt
-          active-text="深色"
-          inactive-text="浅色"
-        />
-      </div>
-    </header>
+    <WorkbenchHeader
+      :controller="workbenchSettings"
+      :health="health"
+      :capture="capture"
+      :selected-row-index="selectedRowIndex"
+      :main-workspace="mainWorkspace"
+      v-model:dark="dark"
+      @captures="returnCaptureWorkspace"
+      @catalog="openProtocolQuery()"
+    />
     <LiveCapturePanel
       v-show="mainWorkspace === 'captures'"
       ref="livePanel"
@@ -2883,301 +1562,41 @@ onMounted(async () => {
       class="workspace"
       :class="{ 'sidebar-hidden': !sidebarVisible }"
     >
-      <aside v-show="sidebarVisible" class="sidebar">
-        <div class="section-heading">
-          抓包记录
-          <el-button
-            text
-            size="small"
-            @click="sidebarCollapsed = true"
-            :disabled="!capture"
-            aria-label="收起记录侧栏"
-            >收起</el-button
-          >
-          <el-button text size="small" @click="reloadCaptures().catch(failure)"
-            >刷新</el-button
-          >
-        </div>
-        <div class="capture-list">
-          <template v-for="group in groupedRecords" :key="group.key">
-            <details v-if="group.items.length > 1" open class="record-group">
-              <summary :title="group.label">
-                {{ group.label }} · {{ group.items.length }} 次连接 / 记录
-              </summary>
-              <div class="muted">按已确认角色归组，消息与连接仍独立。</div>
-              <div
-                v-for="item in group.items"
-                :key="item.id"
-                role="button"
-                tabindex="0"
-                class="capture-item"
-                :class="{ active: capture?.id === item.id }"
-                @click="openCapture(item)"
-                @keydown.enter.self="openCapture(item)"
-              >
-                <el-button
-                  class="delete-capture"
-                  text
-                  size="small"
-                  type="danger"
-                  :disabled="item.liveState === 'CAPTURING'"
-                  @click.stop="deleteCapture(item)"
-                  >删除</el-button
-                ><strong>{{ captureName(item) }}</strong
-                ><small
-                  >{{ item.messageCount.toLocaleString() }} 条 ·
-                  {{ item.temporary ? "临时" : "已保存" }} ·
-                  {{ item.liveState === "CAPTURING" ? "采集中" : "已结束" }}
-                  <span v-if="unread[item.id]" class="new-count"
-                    >+{{ unread[item.id] }}</span
-                  ></small
-                >
-              </div>
-            </details>
-            <div
-              v-else
-              role="button"
-              tabindex="0"
-              @keydown.enter.self="openCapture(item)"
-              v-for="item in group.items"
-              :key="item.id || item.name"
-              class="capture-item"
-              :class="{ active: capture?.id === item.id }"
-              :title="item.name"
-              @click="openCapture(item)"
-            >
-              <el-button
-                class="delete-capture"
-                text
-                size="small"
-                type="danger"
-                :disabled="item.liveState === 'CAPTURING'"
-                @click.stop="deleteCapture(item)"
-                title="删除记录"
-                >删除</el-button
-              >
-              <strong>{{ captureName(item) }}</strong
-              ><small v-if="item.id"
-                >{{ item.messageCount.toLocaleString() }} 条消息 ·
-                {{ item.temporary ? "临时" : "已保存" }} ·
-                {{ item.liveState === "CAPTURING" ? "采集中" : "已结束" }}
-                <span v-if="unread[item.id]" class="new-count"
-                  >+{{ unread[item.id] }}</span
-                ></small
-              ><small v-else>{{ item.error }}</small>
-            </div>
-          </template>
-          <div v-if="!captures.length" class="muted empty-small">
-            尚无抓包记录<br />导入 SAZ 后保存在本机
-          </div>
-        </div>
-        <div class="sidebar-bottom">
-          <b>本地导入</b>
-          <p class="muted">一次导出整个 WebSocket 会话，批量解析双向消息。</p>
-          <el-button type="primary" :loading="busy" @click="fileInput?.click()"
-            >选择 SAZ 文件</el-button
-          ><input
-            ref="fileInput"
-            type="file"
-            accept=".saz"
-            hidden
-            @change="upload"
-          /><el-input
-            v-model="localPath"
-            placeholder="或填写本机 SAZ 绝对路径"
-            :disabled="busy"
-            @keyup.enter="importPath"
-          /><el-button
-            :loading="busy"
-            :disabled="!localPath.trim()"
-            @click="importPath"
-            >从路径导入</el-button
-          >
-        </div>
-      </aside>
+      <CaptureSidebar
+        v-show="sidebarVisible"
+        :captures="captures"
+        :capture="capture"
+        :unread="unread"
+        v-model:busy="busy"
+        :imported="captureImported"
+        @collapse="sidebarCollapsed = true"
+        @reload="reloadCaptures().catch(failure)"
+        @open="openCapture"
+        @delete="deleteCapture"
+        @clear-error="errorText = ''"
+        @error="failure"
+      />
       <main class="main-area">
-        <div class="capture-bar">
-          <div class="capture-identity">
-            <el-button
-              size="small"
-              @click="sidebarCollapsed = !sidebarCollapsed"
-              :aria-expanded="sidebarVisible"
-              >{{ sidebarVisible ? "收起记录" : "记录 / 导入" }}</el-button
-            >
-            <strong :title="capture?.name">{{
-              capture ? captureName(capture) : "选择或导入抓包"
-            }}</strong>
-            <el-radio-group
-              v-model="workspaceView"
-              size="small"
-              aria-label="数据视图"
-            >
-              <el-radio-button value="messages">消息</el-radio-button>
-              <el-radio-button value="protocols" :disabled="!capture"
-                >协议概览</el-radio-button
-              >
-            </el-radio-group>
-            <span
-              v-if="capture"
-              class="muted retention-state"
-              :title="`已清空 ${capture.clearedCount || 0} 条；消息编号不重用`"
-            >
-              {{ capture.temporary ? "临时" : "已保存" }} · #{{
-                capture.firstIndex ?? 0
-              }}–{{ capture.lastIndex ?? 0 }}
-              <span v-if="capture.evictedCount">
-                · 内存淘汰 {{ capture.evictedCount }}</span
-              >
-              <span v-if="capture.diskFirstIndex !== undefined">
-                · 磁盘 #{{ capture.diskFirstIndex }}–{{
-                  capture.diskLastIndex
-                }}</span
-              >
-            </span>
-            <el-popover trigger="hover" :width="300" placement="bottom-start">
-              <template #reference
-                ><span class="capture-count"
-                  >{{ total.toLocaleString() }} /
-                  {{ (capture?.messageCount || 0).toLocaleString() }} 条</span
-                ></template
-              >
-              <p>
-                当前列表匹配 {{ total }} 条，记录保留
-                {{ capture?.messageCount || 0 }} 条。
-              </p>
-              <p>
-                已解码 {{ capture?.counts.DECODED || 0 }} · 部分
-                {{ capture?.counts.PARTIAL || 0 }} · 未映射
-                {{ capture?.counts.UNMAPPED || 0 }} · 失败
-                {{ capture?.counts.FAILED || 0 }}
-              </p>
-              <p v-if="capture?.evictedCount">
-                已淘汰 {{ capture.evictedCount }} 条旧消息，消息序号保留原值。
-              </p>
-            </el-popover>
-            <el-tag
-              v-if="searchOrigin"
-              size="small"
-              :title="selected?.protocolName"
-              >上下文 #{{ locatedRow ?? selectedRowIndex }}</el-tag
-            >
-            <span
-              v-else-if="capture?.liveState === 'CAPTURING'"
-              class="reading-hint"
-              title="后台采集继续，新消息不会改变当前位置"
-              >正在采集 ·
-              {{ isFollowing ? "跟随最新" : pauseDescription }}</span
-            >
-          </div>
-          <div class="capture-actions">
-            <el-button
-              v-if="capture?.liveState === 'CAPTURING' && !capture.continuous"
-              size="small"
-              :loading="continuousBusy"
-              :disabled="!!capture.continuousError"
-              @click="enableContinuous"
-              title="从当前保留范围开始保存，并持续追加后续消息；不追补此前已淘汰内容"
-              >持续保存</el-button
-            >
-            <span v-if="capture?.continuous" class="muted">正在持续保存</span>
-            <el-button
-              v-if="capture"
-              size="small"
-              :loading="snapshotBusy"
-              @click="saveCurrentSnapshot"
-              title="保存此刻仍保留的消息和字典，不自动保存后续消息"
-              >保存此刻</el-button
-            >
-            <el-button
-              v-if="savedSnapshot"
-              text
-              size="small"
-              @click="openCapture(savedSnapshot)"
-              >查看已存快照</el-button
-            >
-            <el-dropdown v-if="searchOrigin && contextAnchor" trigger="click"
-              ><el-button size="small">{{
-                contextScope === "connection"
-                  ? "当前连接上下文"
-                  : "全部连接上下文"
-              }}</el-button
-              ><template #dropdown
-                ><el-dropdown-menu
-                  ><el-dropdown-item
-                    @click="
-                      contextAnchor &&
-                      jumpToContext(contextAnchor, 'connection')
-                    "
-                    >当前连接上下文</el-dropdown-item
-                  ><el-dropdown-item
-                    @click="
-                      contextAnchor && jumpToContext(contextAnchor, 'all')
-                    "
-                    >全部连接上下文</el-dropdown-item
-                  ></el-dropdown-menu
-                ></template
-              ></el-dropdown
-            >
-            <el-button
-              v-if="searchOrigin"
-              size="small"
-              type="primary"
-              plain
-              @click="returnToSearch"
-              >返回搜索结果</el-button
-            >
-            <el-button
-              v-if="
-                capture &&
-                (capture.temporary || capture.diskFirstIndex !== undefined) &&
-                capture.liveState !== 'CAPTURING'
-              "
-              size="small"
-              type="primary"
-              @click="saveCapture"
-              >保存记录</el-button
-            >
-            <el-button
-              v-if="
-                capture?.liveState === 'CAPTURING' &&
-                operationStart?.captureId !== capture.id
-              "
-              size="small"
-              @click="beginOperation"
-              >开始标记操作</el-button
-            >
-            <el-button
-              v-if="capture && operationStart?.captureId === capture.id"
-              size="small"
-              type="primary"
-              @click="endOperation"
-              >结束并选取区间</el-button
-            >
-            <el-dropdown trigger="click"
-              ><el-button size="small" :disabled="!capture">记录操作</el-button
-              ><template #dropdown
-                ><el-dropdown-menu
-                  ><el-dropdown-item @click="connectionIdentityDialog = true"
-                    >账号 / 备注</el-dropdown-item
-                  ><el-dropdown-item @click="openMark"
-                    >标记操作区间</el-dropdown-item
-                  ><el-dropdown-item @click="exportCapture"
-                    >导出解码 JSON</el-dropdown-item
-                  ></el-dropdown-menu
-                ></template
-              ></el-dropdown
-            >
-            <el-button
-              size="small"
-              :disabled="!selected"
-              @click="detailOpen = !detailOpen"
-              >{{ detailOpen ? "收起详情" : "展开详情" }}</el-button
-            >
-            <el-button size="small" @click="focusMode = true"
-              >专注列表</el-button
-            >
-          </div>
-        </div>
+        <CaptureRecordToolbar
+          :capture="capture"
+          :total="total"
+          :sidebar-visible="sidebarVisible"
+          :search-origin="!!searchOrigin"
+          :context-anchor="contextAnchor"
+          :context-scope="contextScope"
+          :located-row="locatedRow"
+          :is-following="isFollowing"
+          :pause-description="pauseDescription"
+          :analysis-projects="health.analysisProjects"
+          :operations="captureOperations"
+          :project="analysisProject"
+          :selection="selection"
+          v-model:sidebar-collapsed="sidebarCollapsed"
+          v-model:focus-mode="focusMode"
+          v-model:connection-identity-dialog="connectionIdentityDialog"
+          v-model:workspace-view="workspaceView"
+          :actions="{ openCapture, jumpToContext, returnToSearch, saveCapture }"
+        />
         <div
           v-if="health.ready && !supportsAnalysis"
           class="warning-bar compatibility-bar"
@@ -3189,74 +1608,22 @@ onMounted(async () => {
             >重新检查</el-button
           >
         </div>
-        <div v-if="capture" class="analysis-tabbar" aria-label="临时分析页签">
-          <span
-            v-for="item in analysisTabs"
-            :key="item.id"
-            class="analysis-tab"
-            :class="{ active: item.id === activeAnalysisTab }"
-            ><button
-              @click="switchAnalysisTab(item.id)"
-              @dblclick="renameAnalysisTab(item.id)"
-              :aria-pressed="item.id === activeAnalysisTab"
-              title="双击重命名"
-            >
-              {{ item.name }}</button
-            ><button
-              v-if="analysisTabs.length > 1"
-              @click="closeAnalysisTab(item.id)"
-              :aria-label="`关闭 ${item.name}`"
-            >
-              ×
-            </button></span
-          ><el-button
-            text
-            size="small"
-            @click="newAnalysisTab"
-            :disabled="analysisTabs.length >= MAX_ANALYSIS_TABS"
-            >＋ 分析页签</el-button
-          >
-          <el-popover trigger="click" :width="340" @show="refreshRetention"
-            ><template #reference
-              ><button class="storage-summary">
-                {{ retentionCapture?.temporary ? "临时记录" : "已保存" }} · 内存
-                {{ retentionCapture?.messageCount.toLocaleString() }} 条{{
-                  retentionCapture?.continuous ? " · 持续保存中" : ""
-                }}
-              </button></template
-            >
-            <p>
-              内存保留 #{{ retentionCapture?.firstIndex ?? 0 }}–{{
-                retentionCapture?.lastIndex ?? 0
-              }}，上限 {{ retentionCapture?.maxMessages ?? "未提供" }} 条。
-            </p>
-            <p v-if="retentionError" class="warning-bar">
-              {{ retentionError }}
-            </p>
-            <p v-if="retentionCapture?.diskFirstIndex !== undefined">
-              磁盘已保存 #{{ retentionCapture.diskFirstIndex }}–{{
-                retentionCapture.diskLastIndex
-              }}。
-            </p>
-            <p v-else>
-              {{
-                retentionCapture?.temporary
-                  ? "当前记录尚未保存，退出工作台会丢失临时内容。"
-                  : "当前为已保存记录。"
-              }}
-            </p>
-            <p v-if="retentionCapture?.evictedCount">
-              内存已淘汰 {{ retentionCapture.evictedCount }} 条；{{
-                retentionCapture.diskFirstIndex === undefined
-                  ? "更早消息未保存，无法恢复。"
-                  : "请按磁盘已保存范围核对是否可恢复。"
-              }}
-            </p>
-            <p v-if="capture.clearedCount">
-              手动清空 {{ capture.clearedCount }} 条。
-            </p></el-popover
-          >
-        </div>
+        <AnalysisTabsBar
+          v-if="capture"
+          :capture="capture"
+          :summary="captures.find((item) => item.id === capture?.id)"
+          :latest="activity.latest.value"
+          :tabs="analysisTabState"
+          :project-sync="projectSync"
+          :analysis-projects="health.analysisProjects"
+          :actions="{
+            switchAnalysisTab,
+            closeAnalysisTab,
+            renameAnalysisTab,
+            newAnalysisTab,
+            confirmReloadProject,
+          }"
+        />
         <div
           v-if="displayedQuery?.range.startsWith('recent:')"
           class="temporary-view-bar"
@@ -3270,227 +1637,31 @@ onMounted(async () => {
             >返回实时 / 最新</el-button
           >
         </div>
-        <div class="workspace-tools">
-          <div class="search-toolbar" role="search" aria-label="协议与消息搜索">
-            <el-input
-              v-model="search"
-              clearable
-              aria-label="搜索协议或字段"
-              placeholder="协议名、字段名或实际值"
-              @keyup.enter="filter"
-              @clear="filter"
-            />
-            <el-input
-              v-model="protocolId"
-              clearable
-              aria-label="协议 ID"
-              placeholder="协议 ID"
-              @keyup.enter="filter"
-              @clear="filter"
-            />
-            <el-input
-              v-model="messageIndex"
-              clearable
-              aria-label="消息序号"
-              placeholder="消息序号 #"
-              @keyup.enter="filter"
-              @clear="filter"
-            />
-            <el-button
-              type="primary"
-              :loading="interactiveLoading"
-              @click="filter"
-              >查询</el-button
-            >
-          </div>
-          <div class="view-toolbar">
-            <el-dropdown
-              trigger="click"
-              :disabled="!capture || !supportsAnalysis"
-              ><el-button :disabled="!capture || !supportsAnalysis"
-                >分析工具</el-button
-              ><template #dropdown
-                ><el-dropdown-menu
-                  ><el-dropdown-item @click="openResearch('time')"
-                    >时间定位</el-dropdown-item
-                  ><el-dropdown-item @click="openResearch('review')"
-                    >操作回顾</el-dropdown-item
-                  ><el-dropdown-item @click="openResearch('compare')"
-                    >两次操作对照</el-dropdown-item
-                  ><el-dropdown-item @click="openResearch('anomalies')"
-                    >异常协议</el-dropdown-item
-                  ><el-dropdown-item @click="openResearch('notes')"
-                    >消息 / 字段批注</el-dropdown-item
-                  ><el-dropdown-item @click="openResearch('columns')"
-                    >字段列与关注</el-dropdown-item
-                  ></el-dropdown-menu
-                ></template
-              ></el-dropdown
-            >
-            <el-popover
-              v-model:visible="advancedFilters"
-              trigger="click"
-              placement="bottom-start"
-              :width="420"
-            >
-              <template #reference
-                ><el-button
-                  :type="advancedFilters ? 'primary' : 'default'"
-                  :aria-expanded="advancedFilters"
-                  >更多筛选</el-button
-                ></template
-              >
-              <div class="advanced-filters filter-popover">
-                <el-select
-                  v-model="direction"
-                  placeholder="全部方向"
-                  aria-label="方向筛选"
-                  clearable
-                  @change="filter"
-                  ><el-option
-                    label="发送 CS"
-                    :value="MessageDirection.CS" /><el-option
-                    label="接收 SC"
-                    :value="MessageDirection.SC"
-                /></el-select>
-                <el-select
-                  v-model="status"
-                  placeholder="全部状态"
-                  aria-label="解码状态筛选"
-                  clearable
-                  @change="filter"
-                  ><el-option
-                    v-for="(label, key) in statusText"
-                    :key="key"
-                    :label="label"
-                    :value="key"
-                /></el-select>
-                <el-select
-                  v-model="connection"
-                  placeholder="全部连接"
-                  aria-label="连接筛选"
-                  clearable
-                  @change="filter"
-                  ><el-option
-                    v-for="item in capture?.connections || []"
-                    :key="item.id"
-                    :value="item.id"
-                    :label="connectionLabel(item)"
-                    :title="item.endpoint"
-                /></el-select>
-                <el-checkbox v-model="hideHeartbeat" @change="filter"
-                  >隐藏心跳</el-checkbox
-                >
-              </div>
-              <div v-if="capture?.marks.length" class="marks filter-marks">
-                <span class="muted">操作区间</span
-                ><el-select
-                  v-model="selectedRange"
-                  clearable
-                  placeholder="全部消息"
-                  @change="filter"
-                  ><el-option
-                    v-for="(item, index) in capture.marks"
-                    :key="index"
-                    :label="`${item.expired ? '[部分已淘汰] ' : ''}${item.name} [${item.from}–${item.to}]`"
-                    :value="String(index + 1)" /></el-select
-                ><span class="muted">区间不自动证明请求响应关系。</span>
-              </div>
-            </el-popover>
-            <el-select v-model="order" @change="filter" aria-label="消息排序">
-              <el-option label="最新在前 ↓" value="desc" /><el-option
-                label="最早在前 ↑"
-                value="asc"
-              />
-            </el-select>
-            <el-button @click="filterDialog = true">协议过滤</el-button>
-            <el-button @click="viewDialog = true">常用视图</el-button>
-            <el-button
-              v-if="undoPlace"
-              :disabled="interactiveLoading"
-              @click="undoQuickQuery"
-              >撤销筛选操作</el-button
-            >
-            <span v-if="hasDraft" class="muted" role="status"
-              >输入有待提交条件</span
-            >
-            <el-button
-              :type="batchExcluding ? 'primary' : 'default'"
-              :disabled="!capture"
-              @click="toggleBatchMode"
-            >
-              {{ batchExcluding ? "退出批量排除" : "批量排除" }}
-            </el-button>
-            <el-popover
-              v-model:visible="tableSettings"
-              trigger="click"
-              placement="bottom-end"
-              :width="360"
-            >
-              <template #reference><el-button>表格设置</el-button></template>
-              <div class="column-settings">
-                <strong>显示列</strong>
-                <el-checkbox v-model="columns.time">时间</el-checkbox
-                ><el-checkbox v-model="columns.protocolId">协议 ID</el-checkbox>
-                <el-checkbox v-model="columns.status">解码状态</el-checkbox
-                ><el-checkbox v-model="columns.bytes">字节数</el-checkbox>
-                <el-checkbox v-model="columns.sequence">帧序号</el-checkbox
-                ><el-checkbox v-model="columns.connection">连接</el-checkbox>
-                <el-checkbox v-model="columns.actions">行操作</el-checkbox>
-              </div>
-              <p class="muted">详情布局，自动模式按数据区实际宽高选择</p>
-              <el-radio-group v-model="detailDock" size="small"
-                ><el-radio-button value="auto">自动</el-radio-button
-                ><el-radio-button value="right">右侧</el-radio-button
-                ><el-radio-button value="bottom">底部</el-radio-button
-                ><el-radio-button value="overlay"
-                  >浮层</el-radio-button
-                ></el-radio-group
-              >
-              <p class="muted">
-                空间不足时暂用浮层，保持列表视野；方向键阅读，Esc 收起详情。
-              </p>
-              <el-button size="small" @click="resetLayout"
-                >恢复默认布局</el-button
-              >
-            </el-popover>
-          </div>
-          <div
-            v-if="activeFilters.length"
-            class="active-filters"
-            aria-label="当前生效条件"
-          >
-            <el-tag
-              v-for="item in visibleFilters"
-              disable-transitions
-              :key="item.key + ':' + (item.value || '')"
-              closable
-              :title="item.label"
-              @close="removeFilter(item.key, item.value)"
-              >{{ item.label }}</el-tag
-            >
-
-            <el-button
-              v-if="activeFilters.length > 3"
-              text
-              size="small"
-              :aria-expanded="expandedTags"
-              @click="expandedTags = !expandedTags"
-              >{{
-                expandedTags
-                  ? "收起条件"
-                  : `另有 ${activeFilters.length - 3} 条条件`
-              }}</el-button
-            >
-            <el-button
-              v-if="activeFilters.length"
-              text
-              size="small"
-              @click="resetFilters"
-              >重置全部条件</el-button
-            >
-          </div>
-        </div>
+        <CaptureFilterToolbar
+          ref="searchHistory"
+          :filters="filters"
+          :capture="capture"
+          :dictionary="
+            capture?.catalog?.sha256 || health.catalog.sha256 || 'unloaded'
+          "
+          :columns="columns"
+          v-model:detail-dock="detailDock"
+          :supports-analysis="supportsAnalysis"
+          :interactive-loading="interactiveLoading"
+          :has-undo="!!undoPlace"
+          :batch-excluding="batchExcluding"
+          @views="viewDialog = true"
+          :actions="{
+            filter,
+            openResearch,
+            undoQuickQuery,
+            toggleBatchMode,
+            resetLayout,
+            removeFilter,
+            quickQuery,
+            resetFilters,
+          }"
+        />
         <div
           v-if="batchExcluding"
           class="batch-exclusion-bar"
@@ -3577,6 +1748,7 @@ onMounted(async () => {
           :watched="protocolWatch.choices.value"
           :activity-error="activityWindow.error.value || activity.error.value"
           :loading="activityWindow.loading.value"
+          :updated-at="activityWindow.updatedAt.value"
           :restart-required="activityWindow.restartRequired.value"
           @latest="jumpLatest"
           @activity="viewActivity"
@@ -3622,6 +1794,40 @@ onMounted(async () => {
             size="small"
             @click="fieldWatch.refresh"
             >重试字段关注</el-button
+          >
+        </div>
+        <div
+          v-if="navigationReturn?.place.captureId === capture?.id"
+          class="reading-return-bar"
+        >
+          <el-button text size="small" @click="returnReadingCheckpoint"
+            >返回刚才位置{{
+              navigationReturn?.place.selectedIndex !== undefined
+                ? ` · 消息 #${navigationReturn.place.selectedIndex}`
+                : ""
+            }}</el-button
+          ><el-button text size="small" @click="navigationReturn = undefined"
+            >关闭返回入口</el-button
+          >
+        </div>
+        <div v-if="selectedOperationRange" class="selected-operation-bar">
+          <b
+            >已选原消息 #{{ selectedOperationRange.from }}–{{
+              selectedOperationRange.to
+            }}</b
+          ><span class="muted"
+            >按原编号选区间，包含当前筛选隐藏的消息；原内容未改动。</span
+          ><el-button size="small" @click="useSelectedRange('mark')"
+            >标记区间</el-button
+          ><el-button size="small" @click="useSelectedRange('snapshot')"
+            >保存区间快照</el-button
+          ><el-button size="small" @click="useSelectedRange('review')"
+            >操作回顾</el-button
+          ><el-button
+            text
+            size="small"
+            @click="selectedOperationRange = undefined"
+            >取消范围</el-button
           >
         </div>
         <div
@@ -3691,27 +1897,42 @@ onMounted(async () => {
                     ></template
                   >
                 </div>
-                <el-table
-                  v-memo="tableRenderDeps"
-                  ref="packetTable"
-                  class="packet-table"
-                  v-loading="busy"
-                  :data="visibleRows"
-                  :fit="true"
-                  :row-class-name="
-                    ({ row }: { row: Packet }) =>
-                      [
-                        row.index === highlightedRow ? 'located-row' : '',
-                        recentRows.has(row.index) ? 'recent-row' : '',
-                        protocolWatch.has(row) ? 'watched-row' : '',
-                      ].join(' ')
-                  "
-                  height="100%"
-                  highlight-current-row
-                  empty-text="暂无消息，先导入包含 WebSocket 数据的 SAZ"
-                  @row-click="select"
-                  row-key="index"
-                  size="small"
+                <CaptureMessageTable
+                  ref="messageTable"
+                  :rows="rows"
+                  :visible-rows="visibleRows"
+                  :capture="capture"
+                  :busy="busy"
+                  :table-render-deps="tableRenderDeps"
+                  :highlighted-row="highlightedRow"
+                  :recent-rows="recentRows"
+                  :selected-operation-range="selectedOperationRange"
+                  :batch-excluding="batchExcluding"
+                  :selected-protocols="selectedProtocols"
+                  :columns="columns"
+                  :field-columns="research.columns.value"
+                  :workspace-layout="workspaceLayout"
+                  :detail-query="detailQuery"
+                  :displayed-query="displayedQuery"
+                  :navigating-search-result="navigatingSearchResult"
+                  :fold-repeats="foldRepeats"
+                  :grouped-repeats="groupedRepeats"
+                  :expanded-repeats="expandedRepeats"
+                  :message-grouping="messageGrouping"
+                  :is-watched="protocolWatch.has"
+                  :status-text="statusText"
+                  :actions="{
+                    tableRowClick,
+                    resetColumnFromHeader,
+                    toggleProtocolSelection,
+                    toggleWatch,
+                    openProtocol,
+                    openGroupPreview,
+                    excludeProtocol,
+                    pauseListForInteraction,
+                    jumpToContext,
+                    onlyProtocol,
+                  }"
                 >
                   <template #empty
                     ><div class="table-empty">
@@ -3785,180 +2006,19 @@ onMounted(async () => {
                       >
                     </div></template
                   >
-                  <el-table-column v-if="batchExcluding" width="36" label="">
-                    <template #default="{ row }">
-                      <input
-                        type="checkbox"
-                        class="protocol-select"
-                        :aria-label="`选择协议 ${row.protocolName || (row.protocolId ?? '未知')}`"
-                        :disabled="!protocolChoice(row)"
-                        :checked="
-                          selectedProtocols.some(
-                            (item) => item.key === protocolChoice(row)?.key,
-                          )
-                        "
-                        @click.stop
-                        @change="toggleProtocolSelection(row)"
-                      />
-                    </template>
-                  </el-table-column>
-                  <el-table-column prop="index" label="消息序号" width="82" />
-                  <el-table-column v-if="columns.time" label="时间" width="108"
-                    ><template #default="{ row }">{{
-                      time(row.time)
-                    }}</template></el-table-column
-                  >
-                  <el-table-column label="方向" width="58"
-                    ><template #default="{ row }"
-                      ><span
-                        class="direction"
-                        :class="row.direction.toLowerCase()"
-                        >{{
-                          row.direction === MessageDirection.CS
-                            ? "↑ CS"
-                            : "↓ SC"
-                        }}</span
-                      ></template
-                    ></el-table-column
-                  >
-                  <el-table-column
-                    prop="protocolName"
-                    label="协议"
-                    width="230"
-                    show-overflow-tooltip
-                    ><template #default="{ row }"
-                      ><span class="protocol-cell"
-                        ><button
-                          class="protocol-watch-toggle"
-                          :class="{ watched: protocolWatch.has(row) }"
-                          :aria-label="`${protocolWatch.has(row) ? '取消关注' : '关注'}协议 ${row.protocolName || row.protocolId}`"
-                          :aria-pressed="protocolWatch.has(row)"
-                          :disabled="!protocolChoice(row)"
-                          @click.stop="toggleWatch(row)"
-                        >
-                          {{ protocolWatch.has(row) ? "★" : "☆" }}</button
-                        ><button
-                          class="protocol-name protocol-button"
-                          :title="`${row.protocolName || '未识别消息'} · ${navigatingSearchResult ? '定位上下文并查看详情' : '查看详情'}`"
-                          @click.stop="openProtocol(row)"
-                        >
-                          <HighlightedText
-                            :text="row.protocolName || '未识别消息'"
-                            :query="detailQuery"
-                          /></button
-                        ><button
-                          v-if="
-                            foldRepeats &&
-                            (groupedRepeats.get(row.index)?.length || 0) > 1
-                          "
-                          class="repeat-toggle"
-                          :title="`${groupedRepeats.get(row.index)?.[0]?.time} 至 ${groupedRepeats.get(row.index)?.at(-1)?.time}；仅本页；${messageGrouping === 'protocol' ? '同协议组，内容可不同，可能穿插其他协议，代表行只展示一条样本' : '业务内容相同的连续消息'}；展开核对原消息`"
-                          @click.stop="toggleRepeat(row.index)"
-                        >
-                          {{ expandedRepeats.has(row.index) ? "收起" : "展开" }}
-                          {{ messageGrouping === "protocol" ? "组" : "×"
-                          }}{{ groupedRepeats.get(row.index)?.length }}
-                        </button></span
-                      ></template
-                    ></el-table-column
-                  >
-                  <el-table-column
-                    v-for="field in research.columns.value"
-                    :key="field.path"
-                    :label="field.label"
-                    width="150"
-                    show-overflow-tooltip
-                    ><template #default="{ row }"
-                      ><span :title="field.path">{{
-                        row.fieldValues?.[field.path] ?? "—"
-                      }}</span></template
-                    ></el-table-column
-                  >
-                  <el-table-column
-                    prop="preview"
-                    label="消息内容摘要"
-                    min-width="220"
-                    show-overflow-tooltip
-                    ><template #default="{ row }"
-                      ><HighlightedText
-                        :text="row.preview"
-                        :query="displayedQuery?.q" /></template
-                  ></el-table-column>
-                  <el-table-column
-                    v-if="columns.actions"
-                    label="操作"
-                    width="86"
-                  >
-                    <template #default="{ row }">
-                      <button
-                        class="row-exclude"
-                        :aria-label="`排除协议 ${row.protocolName || (row.protocolId ?? '未知')}`"
-                        :disabled="!protocolChoice(row)"
-                        title="排除此协议的全部消息"
-                        @click.stop="excludeProtocol(row)"
-                      >
-                        排除
-                      </button>
-                      <button
-                        class="row-menu"
-                        :aria-label="`消息 #${row.index} 操作`"
-                        aria-haspopup="dialog"
-                        @pointerdown.stop="pauseListForInteraction()"
-                        @click.stop="rowActions?.open($event, row)"
-                      >
-                        ⋯
-                      </button>
-                    </template>
-                  </el-table-column>
-                  <el-table-column
-                    v-if="columns.protocolId"
-                    prop="protocolId"
-                    label="协议 ID"
-                    width="90"
-                  />
-                  <el-table-column v-if="columns.status" label="状态" width="92"
-                    ><template #default="{ row }"
-                      ><span
-                        class="decode-state"
-                        :class="row.status.toLowerCase()"
-                        >{{ statusText[row.status] || row.status }}</span
-                      ></template
-                    ></el-table-column
-                  >
-                  <el-table-column
-                    v-if="columns.sequence"
-                    prop="sequence"
-                    label="帧序号"
-                    width="76"
-                  />
-                  <el-table-column v-if="columns.bytes" label="字节" width="76"
-                    ><template #default="{ row }">{{
-                      row.inputFormat === "DECOMPRESSED_MESSAGE"
-                        ? row.bytes
-                        : row.wireBytes
-                    }}</template></el-table-column
-                  >
-                  <el-table-column
-                    v-if="columns.connection"
-                    label="连接"
-                    width="112"
-                    show-overflow-tooltip
-                    ><template #default="{ row }"
-                      ><CopyText
-                        :value="row.connection"
-                        label="完整连接 ID" /></template
-                  ></el-table-column>
-                </el-table>
-                <MessageRowActions
-                  ref="rowActions"
-                  :rows="rows"
-                  :capture-id="capture?.id"
-                  @opening="pauseListForInteraction"
-                  @context="jumpToContext"
-                  @only="onlyProtocol"
-                  @exclude="excludeProtocol"
-                />
+                </CaptureMessageTable>
                 <div class="pagination">
+                  <el-button
+                    v-if="workspaceLayout.resetHint.value"
+                    text
+                    size="small"
+                    @click="
+                      workspaceLayout.reset();
+                      tableRevision++;
+                    "
+                    title="也可双击表头右边缘恢复对应列宽"
+                    >恢复列宽</el-button
+                  >
                   <div class="message-grouping">
                     <span>本页显示：</span
                     ><el-select
@@ -4007,341 +2067,42 @@ onMounted(async () => {
               </section>
             </template>
             <template #secondary>
-              <section class="detail-panel">
-                <div class="detail-heading">
-                  <div class="detail-title-row">
-                    <el-button
-                      text
-                      size="small"
-                      @click="detailOpen = false"
-                      aria-label="收起消息详情"
-                      >收起详情</el-button
-                    >
-                    <b
-                      :title="
-                        selected?.protocolName || detailTarget?.protocolName
-                      "
-                      >{{
-                        selected?.protocolName ||
-                        detailTarget?.protocolName ||
-                        "消息详情"
-                      }}</b
-                    >
-                  </div>
-                  <span v-if="selected" class="muted detail-meta"
-                    >消息 #{{ selected.index }} · 协议 ID
-                    {{ selected.protocolId ?? "未知" }} ·
-                    {{ selected.direction }} ·
-                    {{ selected.bytes }} 字节（解压后）</span
-                  ><el-button
-                    v-if="selected?.protocolId !== undefined"
-                    text
-                    size="small"
-                    @click="openProtocolQuery(true)"
-                    >查看协议定义</el-button
-                  >
-                  <el-button v-if="selected" text size="small" @click="copy">{{
-                    detailCopy.feedback.value || "复制 JSON"
-                  }}</el-button>
-                  <el-button
-                    v-if="selected"
-                    text
-                    size="small"
-                    @click="neighbour(-1)"
-                    :disabled="!hasPrevious || interactiveLoading"
-                    >上一条</el-button
-                  >
-                  <el-button
-                    v-if="selected"
-                    text
-                    size="small"
-                    @click="neighbour(1)"
-                    :disabled="!hasNext || interactiveLoading"
-                    >下一条</el-button
-                  >
-                  <el-button
-                    v-if="selected"
-                    text
-                    size="small"
-                    :loading="comparingPrevious"
-                    @click="comparePrevious"
-                    >对比上一条同协议</el-button
-                  >
-                  <el-button
-                    v-if="selected"
-                    text
-                    size="small"
-                    @click="editNote('')"
-                    >消息批注</el-button
-                  >
-                  <span
-                    v-if="selected"
-                    class="muted"
-                    :title="`查询 ${queryMetrics.queryMs.toFixed(1)}ms · 等锁 ${queryMetrics.lockWaitMs.toFixed(1)}ms · 快照 ${queryMetrics.snapshotMs.toFixed(1)}ms`"
-                    >详情 {{ detailMs.toFixed(0) }}ms</span
-                  >
-                  <el-popover
-                    v-if="selected"
-                    trigger="click"
-                    placement="bottom-end"
-                    :width="340"
-                  >
-                    <template #reference
-                      ><el-button text size="small"
-                        >消息对比{{
-                          comparisonBase ? ` · #${comparisonBase.index}` : ""
-                        }}</el-button
-                      ></template
-                    >
-                    <div class="detail-actions detail-popover">
-                      <span class="muted"
-                        >{{
-                          searchOrigin
-                            ? "完整上下文"
-                            : activeFilters.length
-                              ? "当前筛选结果"
-                              : "全部消息"
-                        }}
-                        · 上一条 / 下一条支持跨页</span
-                      >
-                      <el-button size="small" @click="setComparisonBase"
-                        >设为对比基准</el-button
-                      >
-                      <el-button
-                        v-if="comparisonBase"
-                        size="small"
-                        :disabled="
-                          comparisonBase.index === selected.index ||
-                          selectedRowIndex !== selected.index
-                        "
-                        @click="comparisonDialog = true"
-                        >与 #{{ comparisonBase.index }} 对比变化</el-button
-                      >
-                      <el-button
-                        v-if="comparisonBase"
-                        text
-                        size="small"
-                        @click="comparisonBase = undefined"
-                        >清除基准</el-button
-                      >
-                    </div>
-                  </el-popover>
-                  <span
-                    v-if="!selected && detailTarget"
-                    class="muted detail-meta"
-                    >目标：消息 #{{ detailTarget.index }} · 协议 ID
-                    {{ detailTarget.protocolId ?? "未知" }}</span
-                  >
-                </div>
-                <div v-if="detailReturn" class="detail-reading-banner">
-                  <el-button text size="small" @click="restoreDetailReturn"
-                    >返回固定消息 #{{ detailReturn.packet.index }}</el-button
-                  >
-                </div>
-                <div
-                  v-if="selected"
-                  class="detail-reading-banner"
-                  role="status"
-                >
-                  <strong
-                    >固定查看：消息 #{{ selected.index }} ·
-                    {{ selected.protocolName || selected.protocolId }}</strong
-                  >
-                  <span v-if="selectedOutsideRetention"
-                    >已不在保留范围，详情继续保留</span
-                  ><span v-else-if="selectedMissingFromList"
-                    >当前列表未显示此消息</span
-                  >
-                  <el-button
-                    text
-                    size="small"
-                    :disabled="selectedOutsideRetention"
-                    @click="locatePinnedMessage"
-                    >定位此消息</el-button
-                  >
-                  <template v-if="laterMessages?.count"
-                    ><span
-                      >同连接、同方向、同协议后续{{
-                        laterMessages.truncated ? "至少" : ""
-                      }}
-                      {{ laterMessages.count }} 条（保留范围）</span
-                    ><el-button
-                      text
-                      size="small"
-                      @click="viewLatestProtocol(false)"
-                      >查看最新一条</el-button
-                    ><el-button
-                      text
-                      size="small"
-                      @click="viewLatestProtocol(true)"
-                      >与当前对比</el-button
-                    ></template
-                  >
-                  <span v-if="laterError" class="muted">{{ laterError }}</span>
-                </div>
-                <div v-if="detailLoading" class="detail-state" role="status">
-                  正在加载消息 #{{ detailTarget?.index }}，旧消息内容已隐藏。
-                </div>
-                <div v-else-if="detailError" class="detail-state" role="alert">
-                  {{ detailError
-                  }}<el-button
-                    size="small"
-                    @click="detailTarget && select(detailTarget)"
-                    >重试详情</el-button
-                  >
-                </div>
-                <template v-if="selected">
-                  <p
-                    v-if="!selected.connectionIdentity"
-                    class="muted operation-context"
-                  >
-                    此消息身份未识别；连接后来识别到的账号不自动归入本条消息。
-                  </p>
-                  <p
-                    v-if="selected.connectionIdentity"
-                    class="muted operation-context"
-                  >
-                    此消息身份：{{
-                      selected.connectionIdentity.state ===
-                      IdentityState.IDENTIFIED
-                        ? `${selected.connectionIdentity.nickname || ""} · 角色 ${selected.connectionIdentity.roleId} · ${selected.connectionIdentity.serverId || "?"}服`
-                        : "登录请求，身份待确认"
-                    }}（依据 #{{ selected.connectionIdentity.sourceIndex }}
-                    {{ selected.connectionIdentity.sourceProtocol }}）
-                  </p>
-                  <p
-                    v-if="capture?.operationContext"
-                    class="muted operation-context"
-                  >
-                    操作背景：{{ capture.operationContext }}
-                  </p>
-                  <details
-                    v-if="detailQuery && selected"
-                    class="field-matches"
-                    :open="fieldMatches.matches.length > 0"
-                  >
-                    <summary>
-                      搜索“{{ detailQuery }}”：消息体命中
-                      {{ fieldMatches.matches.length }} 个字段{{
-                        fieldMatches.truncated ? "（已达扫描或展示上限）" : ""
-                      }}
-                    </summary>
-                    <div
-                      v-if="fieldMatches.matches.length"
-                      class="field-match-list"
-                    >
-                      <button
-                        v-for="match in fieldMatches.matches"
-                        :key="match.path"
-                        :class="{ active: focusedField === match.path }"
-                        @click="focusField(match.path)"
-                      >
-                        {{ match.path || "/" }} = {{ match.value }}
-                      </button>
-                    </div>
-                    <p v-else class="muted">
-                      已检查的消息体字段中未找到匹配；搜索也可能命中协议名或协议
-                      ID。
-                    </p>
-                  </details>
-                  <div v-if="selected?.error" class="error-bar">
-                    {{ selected.error }}
-                  </div>
-                  <details
-                    v-if="selected?.warnings?.length"
-                    class="warning-bar compact-warning"
-                  >
-                    <summary>
-                      解码提示（{{ selected.warnings.length }}）
-                    </summary>
-                    <div>{{ selected.warnings.join("；") }}</div>
-                  </details>
-                  <p
-                    v-if="fieldAnnotations['']"
-                    class="message-note"
-                    :title="fieldAnnotations['']"
-                  >
-                    消息批注：{{ fieldAnnotations[""] }}
-                  </p>
-                  <el-tabs v-model="tab" class="detail-tabs">
-                    <el-tab-pane label="JSON 树" name="tree"
-                      ><div v-if="tab === 'tree'" class="detail-content">
-                        <JsonTree
-                          v-if="selected?.body !== undefined"
-                          :value="selected.body"
-                          :match-paths="matchPaths"
-                          :key="`${capture?.id}:${selected.index}`"
-                          :expansion-state="expandedFields"
-                          @expansion="rememberExpansion"
-                          :field-actions="supportsAnalysis"
-                          :annotations="fieldAnnotations"
-                          @column="addFieldColumn"
-                          @note="editNote"
-                          @watch-field="watchField"
-                          :focused-path="focusedField"
-                        />
-                        <div v-else class="empty-detail">
-                          {{
-                            selected
-                              ? "当前消息未能完整解码，请查看原始包与失败原因。"
-                              : "选中一条消息，查看协议字段与实际值"
-                          }}
-                        </div>
-                      </div></el-tab-pane
-                    >
-                    <el-tab-pane label="JSON 文本" name="json">
-                      <div v-if="tab === 'json'" class="detail-content">
-                        <TextPreview :value="selected.body" />
-                      </div>
-                    </el-tab-pane>
-                    <el-tab-pane label="原始包体" name="hex"
-                      ><div v-if="tab === 'hex'" class="detail-content">
-                        <p class="muted">
-                          解压后的完整业务包（消息头 + Thrift Compact
-                          消息体；头长见元数据 headerBytes）
-                        </p>
-                        <TextPreview :value="selected.packetHex" format="hex" />
-                        <p class="muted">
-                          {{
-                            selected?.inputFormat === "DECOMPRESSED_MESSAGE"
-                              ? "实时采集器已解压并重组消息，没有提供原始 wire 帧；上方保留的是完整业务包。"
-                              : "SAZ 中的原始 WebSocket 帧（包含帧头、掩码与压缩字节）"
-                          }}
-                        </p>
-                        <TextPreview
-                          :value="selected.wireHex"
-                          format="hex"
-                        /></div
-                    ></el-tab-pane>
-                    <el-tab-pane label="字段定义" name="schema"
-                      ><div v-if="tab === 'schema'" class="detail-content">
-                        <p class="muted">
-                          来源：{{ selected?.catalog?.sourceFile
-                          }}<span v-if="selected?.definition?.line"
-                            >:{{ selected.definition.line }}</span
-                          >
-                          · 字典 SHA256
-                          {{ selected?.catalog?.sha256.slice(0, 16) }}
-                        </p>
-                        <p class="muted">
-                          字段定义格式：[字段名, Thrift 类型]；2 BOOL · 8 I32 ·
-                          10 I64 · 11 STRING · [12,结构名] STRUCT ·
-                          [15,元素类型] LIST · [13,键类型,值类型] MAP
-                        </p>
-                        <JsonTree
-                          v-if="selected?.schema"
-                          :value="selected.schema"
-                          label="字段号"
-                        /></div
-                    ></el-tab-pane>
-                    <el-tab-pane label="元数据" name="metadata">
-                      <pre v-if="tab === 'metadata'" class="detail-content">{{
-                        pretty(detailMetadata)
-                      }}</pre>
-                    </el-tab-pane>
-                  </el-tabs>
-                </template>
-              </section>
+              <MessageDetailPanel
+                :selection="selection"
+                :inspector="inspector"
+                :capture="capture"
+                :maximized="workspaceLayout.maximized.value"
+                :supports-analysis="supportsAnalysis"
+                :has-previous="hasPrevious"
+                :has-next="hasNext"
+                :interactive-loading="interactiveLoading"
+                :comparing-previous="comparingPrevious"
+                :query-metrics="queryMetrics"
+                :has-search-origin="!!searchOrigin"
+                :has-active-filters="!!activeFilters.length"
+                :detail-return="detailReturn"
+                :selected-outside-retention="selectedOutsideRetention"
+                :selected-missing-from-list="selectedMissingFromList"
+                :later-messages="laterMessages"
+                :later-error="laterError"
+                :field-annotations="fieldAnnotations"
+                v-model:comparison-base="comparisonBase"
+                @compare="comparisonDialog = true"
+                :actions="{
+                  openProtocolQuery,
+                  neighbour,
+                  comparePrevious,
+                  editNote,
+                  setComparisonBase,
+                  restoreDetailReturn,
+                  locatePinnedMessage,
+                  viewLatestProtocol,
+                  select,
+                  addFieldColumn,
+                  watchField,
+                  toggleDetailMaximize,
+                }"
+              />
             </template>
           </SplitPane>
         </div>
@@ -4352,28 +2113,11 @@ onMounted(async () => {
       :capture-id="capture?.id"
       @saved="identityChanged"
     />
-    <el-dialog
-      v-model="viewDialog"
-      title="常用分析视图"
-      width="min(600px,94vw)"
-    >
-      <p class="muted">
-        保存已生效筛选和显示列；不保存消息、连接、区间或未提交输入。最多 12
-        个，同名覆盖。
-      </p>
-      <el-button :disabled="!displayedQuery" @click="saveView"
-        >保存当前视图</el-button
-      >
-      <p v-if="!savedViews.length" class="muted">尚未保存视图</p>
-      <div v-for="view in savedViews" :key="view.name" class="saved-view-row">
-        <strong>{{ view.name }}</strong
-        ><span class="muted"
-          >字典 {{ view.dictionary?.slice(0, 12) || "未知" }}</span
-        >
-        <el-button :disabled="!capture" @click="applyView(view)">应用</el-button
-        ><el-button text @click="deleteView(view.name)">删除</el-button>
-      </div>
-    </el-dialog>
+    <SavedViewsDialog
+      :controller="savedViewState"
+      :can-save="!!displayedQuery"
+      :can-apply="!!capture"
+    />
     <el-dialog
       v-model="comparisonDialog"
       title="消息字段变化对比"
@@ -4386,6 +2130,29 @@ onMounted(async () => {
         :after="selected"
       />
     </el-dialog>
+    <input
+      ref="projectInput"
+      type="file"
+      accept=".json,application/json"
+      hidden
+      @change="importAnalysisProject"
+    />
+    <MessageGroupPreview
+      v-if="groupPreviewOpen && previewGroup !== undefined"
+      :rows="groupedRepeats.get(previewGroup) || []"
+      :protocol="messageGrouping === 'protocol'"
+      :expanded="expandedRepeats.has(previewGroup)"
+      @close="
+        groupPreviewOpen = false;
+        closeGroupPreview();
+      "
+      @inspect="inspectGroupMessage"
+      @expand="
+        previewGroup !== undefined && toggleRepeat(previewGroup);
+        groupPreviewOpen = false;
+        closeGroupPreview();
+      "
+    />
     <ResearchPanel
       v-if="researchOpen && capture && supportsAnalysis"
       :capture="capture"
@@ -4408,267 +2175,17 @@ onMounted(async () => {
         markDialog = true;
       "
     />
-    <el-dialog
-      v-model="noteDialog"
-      title="消息 / 字段批注"
-      width="min(520px, 94vw)"
-      ><p>消息 #{{ noteDraft.index }} · {{ noteDraft.path || "整条消息" }}</p>
-      <p class="muted">
-        批注为人工记录，不改变协议解码结果。标为“已验证”须由你自行核对证据。
-      </p>
-      <el-select v-model="noteDraft.kind" aria-label="批注类型"
-        ><el-option
-          v-for="kind in ['备注', '推测', '已验证']"
-          :key="kind"
-          :label="kind"
-          :value="kind" /></el-select
-      ><el-input
-        v-model="noteDraft.text"
-        type="textarea"
-        :rows="4"
-        maxlength="500"
-        show-word-limit
-        placeholder="记录观察、判断依据或待确认的问题"
-      /><template #footer
-        ><el-button @click="noteDialog = false">取消</el-button
-        ><el-button type="primary" @click="saveNote"
-          >保存批注</el-button
-        ></template
-      ></el-dialog
-    >
-    <el-dialog
-      v-model="markDialog"
-      title="标记区间 / 保存 AI 分析快照"
-      width="500px"
-      ><p class="muted">
-        以列表“消息序号”列为边界，保存一次操作前后的消息范围。区间不自动证明请求与推送的因果关系。“保存分析快照”会复制并保存该区间和字典，原连接继续采集；已淘汰的消息无法补回。
-      </p>
-      <el-form label-width="90px"
-        ><el-form-item label="操作名称"
-          ><el-input
-            v-model="operation.name"
-            :maxlength="MAX_CAPTURE_NAME_LENGTH"
-            placeholder="例如：联盟科技捐献一次" /></el-form-item
-        ><el-form-item label="操作背景"
-          ><el-input
-            v-model="operation.context"
-            type="textarea"
-            :rows="2"
-            :maxlength="MAX_OPERATION_CONTEXT_LENGTH"
-            placeholder="操作前状态、执行动作和想确认的问题（随快照保存）" /></el-form-item
-        ><el-form-item label="起始序号 #"
-          ><el-input-number
-            v-model="operation.from"
-            :min="capture?.firstIndex || 0"
-            :max="
-              capture?.lastIndex ??
-              Math.max(0, (capture?.messageCount || 1) - 1)
-            " /></el-form-item
-        ><el-form-item label="结束序号 #"
-          ><el-input-number
-            v-model="operation.to"
-            :min="operation.from"
-            :max="
-              capture?.lastIndex ??
-              Math.max(0, (capture?.messageCount || 1) - 1)
-            " /></el-form-item></el-form
-      ><template #footer
-        ><el-button @click="markDialog = false">取消</el-button
-        ><el-button
-          v-if="supportsAnalysis"
-          @click="
-            lastOperationRange = { from: operation.from, to: operation.to };
-            markDialog = false;
-            openResearch('review');
-          "
-          >查看操作回顾</el-button
-        ><el-button type="primary" :loading="busy" @click="freezeOperation"
-          >保存快照并分析</el-button
-        ><el-button type="primary" :loading="busy" @click="mark"
-          >保存区间</el-button
-        ></template
-      ></el-dialog
-    >
-    <el-dialog v-model="filterDialog" title="协议过滤" width="540px">
-      <p class="muted">
-        协议名或协议 ID 普通词按模糊包含匹配；id:12 精确匹配协议
-        ID，name:GcUpdate
-        精确匹配协议名。支持逗号分隔，同组任一匹配、排除优先。行内与批量快捷操作自动使用精确条件。
-      </p>
-      <el-form label-width="90px">
-        <el-form-item label="仅包含"
-          ><el-input
-            v-model="include"
-            placeholder="例如：Donate,2361"
-            clearable
-        /></el-form-item>
-        <el-form-item label="排除"
-          ><el-input
-            v-model="exclude"
-            placeholder="例如：MapAppear,SynchronizeTime"
-            clearable
-        /></el-form-item>
-      </el-form>
-      <template #footer
-        ><el-button
-          @click="
-            include = '';
-            exclude = '';
-            filter();
-            filterDialog = false;
-          "
-          >清除过滤</el-button
-        ><el-button
-          type="primary"
-          @click="
-            filter();
-            filterDialog = false;
-          "
-          >应用</el-button
-        ></template
-      >
-    </el-dialog>
-    <el-dialog
-      v-model="settingsDialog"
-      title="采集设置与竞品协议"
-      width="680px"
-    >
-      <p class="muted">
-        修改前请停止采集。路径和缓存设置保存在本机，启动时自动加载；历史记录保留各自的协议字典。
-      </p>
-      <el-descriptions
-        :column="1"
-        size="small"
-        border
-        style="margin-bottom: 16px"
-      >
-        <el-descriptions-item label="后端服务">{{
-          settings.backendAddress
-        }}</el-descriptions-item>
-        <el-descriptions-item label="页面地址">{{
-          settings.browserAddress
-        }}</el-descriptions-item>
-        <el-descriptions-item label="采集代理">{{
-          settings.proxyAddress
-        }}</el-descriptions-item>
-        <el-descriptions-item label="启动配置"
-          ><span style="overflow-wrap: anywhere">{{
-            settings.configFile
-          }}</span></el-descriptions-item
-        >
-      </el-descriptions>
-      <p class="muted">
-        端口在上述配置文件修改，重启项目生效；页面不会另外保存一套端口。
-      </p>
-      <el-tabs v-model="settingsTab">
-        <el-tab-pane label="协议与缓存" name="protocol">
-          <p v-if="settings.catalogError" class="error-bar">
-            {{ settings.catalogError }}
-          </p>
-          <el-form label-width="120px">
-            <el-form-item label="目录 / 协议文件"
-              ><el-input
-                v-model="settings.competitorPath"
-                placeholder="客户端根目录、任意子目录，或 thrift_data.js 完整路径"
-                @input="sourceChanged"
-            /></el-form-item>
-            <el-form-item v-if="protocolCandidates.length" label="候选协议文件">
-              <el-select
-                v-model="selectedProtocolFile"
-                placeholder="找到多份，请选择一份"
-                style="width: 100%"
-              >
-                <el-option
-                  v-for="item in protocolCandidates"
-                  :key="item.path"
-                  :value="item.path"
-                  :label="`${item.relativePath} · ${Math.ceil(item.sizeBytes / 1024)} KB`"
-                  :title="item.path"
-                />
-              </el-select>
-            </el-form-item>
-            <el-form-item
-              ><el-button :loading="settingsBusy" @click="findProtocolFiles"
-                >查找协议文件</el-button
-              ><el-button
-                type="primary"
-                :loading="settingsBusy"
-                @click="reloadCatalog"
-                >加载协议并记住路径</el-button
-              ><span class="muted"
-                >当前 {{ health.catalog.messageCount }} 条协议</span
-              ></el-form-item
-            >
-            <el-form-item
-              v-if="settings.loadedProtocolFile"
-              label="当前加载文件"
-            >
-              <span class="muted" style="overflow-wrap: anywhere">{{
-                settings.loadedProtocolFile
-              }}</span>
-            </el-form-item>
-            <el-form-item label="每连接消息上限"
-              ><el-input-number
-                v-model="settings.maxMessages"
-                :min="CACHE_BUDGET.minMessages"
-                :max="CACHE_BUDGET.maxMessages"
-                :step="1000"
-            /></el-form-item>
-            <el-form-item label="每连接容量 MiB"
-              ><el-input-number
-                v-model="settings.maxCacheMiB"
-                :min="CACHE_BUDGET.minMiB"
-                :max="CACHE_BUDGET.maxMiB"
-            /></el-form-item>
-          </el-form>
-          <p class="muted">
-            超过任一上限淘汰最旧消息，序号不重用。临时记录退出后不保留；停止时或停止后可另行保存。
-          </p>
-        </el-tab-pane>
-        <el-tab-pane label="采集目标" name="collector">
-          <CollectorSettingsPanel
-            v-if="settingsDialog && settingsTab === 'collector'"
-          />
-        </el-tab-pane>
-      </el-tabs>
-      <template #footer
-        ><el-button @click="settingsDialog = false">关闭</el-button
-        ><el-button
-          v-if="settingsTab === 'protocol'"
-          type="primary"
-          :loading="settingsBusy"
-          @click="saveSettings"
-          >保存缓存设置</el-button
-        ></template
-      >
-    </el-dialog>
-    <el-dialog
-      v-model="importGuideDialog"
-      title="SAZ 导入说明"
-      width="min(600px, 94vw)"
-    >
-      <p class="muted">
-        用于分析已有抓包文件。实时采集请使用顶部的“接入步骤”。
-      </p>
-      <ol class="guide">
-        <li>
-          准备 .saz 文件，需包含从握手开始的完整主游戏 WebSocket
-          会话。已有文件可直接导入，无需为导入开启系统代理。
-        </li>
-        <li>在“设置 / 协议加载”中加载与抓包版本匹配的客户端协议字典。</li>
-        <li>
-          打开“记录 / 导入”，点击“选择 SAZ
-          文件”；也可填写当前运行工作台的这台电脑上的文件绝对路径，再点击“从路径导入”。
-        </li>
-        <li>
-          导入完成后选择该记录，按协议名、协议 ID
-          或消息序号查找，查看消息字段与原始包体。
-        </li>
-      </ol>
-      <p class="muted">
-        Windows、macOS、Linux
-        均使用同一导入入口。旧记录保留导入时的字典；要使用新字典重新解析，请重新导入原文件。
-      </p>
-    </el-dialog>
+    <MessageNoteDialog :controller="researchWorkspace" />
+    <CaptureOperationDialog
+      :controller="captureOperations"
+      :capture="capture"
+      :supports-analysis="supportsAnalysis"
+      :busy="busy"
+      @review="openResearch('review')"
+    />
+    <WorkbenchSettingsDialog
+      :controller="workbenchSettings"
+      :catalog-count="health.catalog.messageCount"
+    />
   </div>
 </template>

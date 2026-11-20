@@ -74,6 +74,7 @@ public final class SystemController {
                                                         .put("apiVersion", 2)
                                                         .put("activityWindow", true)
                                                         .put("analysisTools", true)
+                                                        .put("analysisProjects", true)
                                                         .set("catalog", catalog.summary(mapper))));
         router.get("/api/settings")
                 .handler(context -> http.worker(context, this::settingsSnapshot));

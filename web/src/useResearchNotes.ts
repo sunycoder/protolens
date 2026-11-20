@@ -130,5 +130,25 @@ export function useResearchNotes(capture: () => Capture | undefined) {
     );
     persist(state.value.columns, { ...state.value.notes, [id]: next });
   }
-  return { columns, notes, addColumn, removeColumn, saveNote, removeNote };
+  function hydrate(document: { notes: unknown[]; columns: unknown[] }) {
+    const id = capture()?.id;
+    if (!id) return;
+    state.value = {
+      columns: {
+        ...state.value.columns,
+        [dictionary()]: document.columns as FieldColumn[],
+      },
+      notes: { ...state.value.notes, [id]: document.notes as MessageNote[] },
+    };
+    writeStored("analyzer.research.v1", state.value);
+  }
+  return {
+    columns,
+    notes,
+    addColumn,
+    removeColumn,
+    saveNote,
+    removeNote,
+    hydrate,
+  };
 }

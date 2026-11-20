@@ -40,6 +40,7 @@ public final class CaptureStore {
     private final ObjectMapper mapper;
     private final CaptureMessageQuery messageQuery;
     private final ProtocolCatalog catalog;
+    private final AnalysisProjectStore projects;
 
     /** 仅缓存最近访问的一份抓包；内容只在此同步仓库内读取，外部返回副本。 */
     private ObjectNode cachedCapture;
@@ -71,6 +72,7 @@ public final class CaptureStore {
         this.mapper = mapper;
         this.messageQuery = new CaptureMessageQuery(mapper);
         this.catalog = catalog;
+        this.projects = new AnalysisProjectStore(directory, mapper);
         Files.createDirectories(directory);
     }
 
@@ -282,7 +284,7 @@ public final class CaptureStore {
         synchronized (this) {
             frozen = freezeRange(id, name, from, to, context);
         }
-        save(frozen);
+        saveProjectSnapshot(id, frozen);
         synchronized (this) {
             return summary(frozen);
         }
@@ -305,9 +307,103 @@ public final class CaptureStore {
                             messages.path(messages.size() - 1).path("index").asInt(),
                             "");
         }
-        save(frozen);
+        saveProjectSnapshot(id, frozen);
         synchronized (this) {
             return summary(frozen);
+        }
+    }
+
+    /** 快照携带对应原编号的批注及显示配置；发布失败时清理尚未发布的成果文件。 */
+    private void saveProjectSnapshot(String source, ObjectNode frozen) throws IOException {
+        String id = frozen.path("id").asText();
+        try {
+            projects.copy(
+                    source,
+                    id,
+                    frozen.path("firstIndex").asInt(),
+                    frozen.path("lastIndex").asInt(Integer.MAX_VALUE));
+            save(frozen);
+        } catch (IOException | RuntimeException failure) {
+            projects.delete(id);
+            throw failure;
+        }
+    }
+
+    public synchronized ObjectNode research(String id) throws IOException {
+        load(id);
+        return projects.read(id);
+    }
+
+    public synchronized ObjectNode saveResearch(String id, JsonNode document) throws IOException {
+        load(id);
+        return projects.save(id, document);
+    }
+
+    /** 导出完整保留快照和分析成果；原编号与字典保留，实时源不会停止或切换。 */
+    public synchronized ObjectNode exportProject(String id) throws IOException {
+        ObjectNode result =
+                mapper.createObjectNode()
+                        .put("format", "protolens-project")
+                        .put("schemaVersion", 1);
+        result.set("capture", read(id));
+        result.set("workspace", projects.read(id));
+        return result;
+    }
+
+    /** 导入只读 JSON 项目为新记录，不覆盖原记录，不信任原文件内的运行状态、ID或目标路径。 */
+    public ObjectNode importProject(JsonNode input) throws IOException {
+        if (!"protolens-project".equals(input.path("format").asText())
+                || input.path("schemaVersion").asInt() != 1
+                || !input.path("capture").isObject()) {
+            throw new IllegalArgumentException("不是支持的 ProtoLens 分析项目");
+        }
+        projects.validate(input.path("workspace"));
+        ObjectNode capture = (ObjectNode) input.path("capture").deepCopy();
+        if (!capture.path("messages").isArray()
+                || capture.path("messages").size() > 200000
+                || !capture.path("dictionary").path("messages").isObject()
+                || !capture.path("dictionary").path("definitions").isObject()
+                || !capture.path("connections").isArray()
+                || !capture.path("marks").isArray()) {
+            throw new IllegalArgumentException("项目消息或字典结构无效");
+        }
+        int previous = -1;
+        for (JsonNode message : capture.path("messages")) {
+            if (!message.isObject()
+                    || !message.path("index").canConvertToInt()
+                    || message.path("index").asInt() <= previous) {
+                throw new IllegalArgumentException("项目原消息编号必须递增且不重复");
+            }
+            previous = message.path("index").asInt();
+        }
+        String id = UUID.randomUUID().toString();
+        capture.put("id", id)
+                .put(
+                        "name",
+                        capture.path("name")
+                                .asText("导入分析项目")
+                                .substring(
+                                        0,
+                                        Math.min(
+                                                100,
+                                                capture.path("name").asText("导入分析项目").length())))
+                .put("temporary", false)
+                .put("liveState", CaptureState.STOPPED.name())
+                .put("continuous", false);
+        for (String field : List.of("diskFirstIndex", "diskLastIndex", "continuousError")) {
+            capture.remove(field);
+        }
+        ObjectNode document = (ObjectNode) input.path("workspace").deepCopy();
+        document.put("revision", 0);
+        try {
+            projects.save(id, document);
+            save(capture);
+        } catch (IOException | RuntimeException failure) {
+            projects.delete(id);
+            throw failure;
+        }
+        synchronized (this) {
+            return summary(capture);
         }
     }
 
@@ -817,6 +913,7 @@ public final class CaptureStore {
         Files.deleteIfExists(directory.resolve(id + ".journal"));
         Files.deleteIfExists(directory.resolve(id + ".connections"));
         Files.deleteIfExists(directory.resolve(id + ".meta"));
+        projects.delete(id);
         liveCaptures.remove(id);
         liveBuffers.remove(id);
         if (cachedCapture != null && cachedCapture.path("id").asText().equals(id)) {

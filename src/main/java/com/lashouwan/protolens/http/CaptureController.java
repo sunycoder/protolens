@@ -26,6 +26,31 @@ public final class CaptureController {
     }
 
     public void register(Router router) {
+        router.get("/api/captures/:id/research")
+                .handler(
+                        context ->
+                                http.worker(
+                                        context, () -> captures.research(context.pathParam("id"))));
+        router.post("/api/captures/:id/research")
+                .handler(
+                        context ->
+                                http.worker(
+                                        context,
+                                        () ->
+                                                captures.saveResearch(
+                                                        context.pathParam("id"),
+                                                        http.body(context))));
+        router.get("/api/captures/:id/project")
+                .handler(
+                        context ->
+                                http.worker(
+                                        context,
+                                        () -> captures.exportProject(context.pathParam("id"))));
+        router.post("/api/import/project")
+                .handler(
+                        context ->
+                                http.worker(
+                                        context, () -> captures.importProject(http.body(context))));
         router.get("/api/captures/:id/time-location")
                 .handler(
                         context ->

@@ -21,6 +21,7 @@ const emit = defineEmits<{
   column: [value: { path: string; label: string }];
   note: [path: string];
   watchField: [value: { path: string; label: string }];
+  focus: [path: string];
 }>();
 const fieldMenu = ref(false);
 function toggle(event: Event) {
@@ -88,12 +89,14 @@ const visibleKeys = computed(() =>
     class="json-tree"
     :class="{
       'json-match': matched,
-      'json-focused': focusedPath === path && matched,
+      'json-focused': focusedPath === path,
     }"
     :data-json-path="path"
   >
     <summary>
-      <span class="json-key">{{ label || "消息体" }}</span>
+      <span class="json-key" @click.stop="emit('focus', path)">{{
+        label || "消息体"
+      }}</span>
       <span class="muted">{{ summary }}</span>
     </summary>
     <JsonTree
@@ -112,6 +115,7 @@ const visibleKeys = computed(() =>
       @column="emit('column', $event)"
       @note="emit('note', $event)"
       @watch-field="emit('watchField', $event)"
+      @focus="emit('focus', $event)"
     />
     <button
       v-if="expanded && count > limit"
@@ -126,12 +130,12 @@ const visibleKeys = computed(() =>
     class="json-leaf"
     :class="{
       'json-match': matched,
-      'json-focused': focusedPath === path && matched,
+      'json-focused': focusedPath === path,
     }"
     :data-json-path="path"
     @contextmenu.prevent="fieldMenu = !!fieldActions"
   >
-    <span class="json-key">{{ label }}</span
+    <span class="json-key" @click.stop="emit('focus', path)">{{ label }}</span
     >:
     <JsonScalar :value="value" />
     <span

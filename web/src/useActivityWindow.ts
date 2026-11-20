@@ -1,6 +1,5 @@
-import { onScopeDispose, ref, shallowRef, watch } from "vue";
-import { api, ApiError, type Capture } from "./types.ts";
-import { RequestGate } from "./workspaceRefresh.ts";
+import { computed, shallowRef } from "vue";
+import { api, type Capture } from "./types.ts";
 import {
   activityWindowParams,
   latestQuery,
@@ -9,95 +8,102 @@ import {
   type CaptureActivity,
 } from "./liveReading.ts";
 import type { WorkspaceQuery } from "./workspaceInteractions.ts";
+import { useStableRefresh } from "./useStableRefresh.ts";
 
-/** 通知与列表使用同一筛选，异步统计只能发布到对应记录、区间和筛选；切换时立即撤下旧入口。 */
+/** 记录和筛选不变时保留已确认统计；消息持续到达只排队一次后续刷新，不产生取消饥饿。 */
 export function useActivityWindow(
   capture: () => Capture | undefined,
   delta: () => ActivityDelta | undefined,
   query: () => WorkspaceQuery,
   snapshot: () => CaptureActivity | undefined,
   enabled: () => boolean = () => true,
+  readingScope: () => string = () => "",
 ) {
-  const value = shallowRef<ActivityDelta>();
-  const source = shallowRef<CaptureActivity>();
-  const loading = ref(false);
-  const error = ref("");
-  const restartRequired = ref(false);
-  const gate = new RequestGate();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  function refresh() {
-    if (timer) clearTimeout(timer);
-    const request = gate.begin();
-    const record = capture(),
-      pending = delta(),
-      original = snapshot();
-    value.value = undefined;
-    source.value = undefined;
-    error.value = "";
-    restartRequired.value = false;
-    loading.value = false;
-    if (!enabled()) {
-      restartRequired.value = true;
-      error.value = "后端尚未提供活动统计接口";
-      return;
-    }
-    if (!record || !pending || !pending.total) return;
-    const params = activityWindowParams(pending, query(), record.marks);
-    if (!params) {
-      value.value = {
-        ...pending,
-        total: 0,
-        attention: 0,
-        protocolCount: 0,
-        firstSeen: [],
-      };
-      return;
-    }
-    loading.value = true;
-    // 合并同一轮列表、活动及筛选变化；只扫描新增窗口，不循环读取整份消息详情。
-    timer = setTimeout(async () => {
-      try {
-        const result = await api<CaptureActivity>(
-          `/api/captures/${record.id}/activity-window?${params}`,
-          { signal: request.signal },
-        );
-        if (
-          !request.current() ||
-          result.captureId !== record.id ||
-          result.clearVersion !== original?.clearVersion
-        )
-          return;
-        value.value = visibleActivityDelta(pending, result);
-        source.value = original;
-      } catch (cause) {
-        if (request.current()) {
-          restartRequired.value =
-            cause instanceof ApiError && cause.status === 404;
-          error.value = String(cause);
-        }
-      } finally {
-        if (request.current()) loading.value = false;
-      }
-    }, 120);
-  }
-  // 使用稳定签名，记录备注变化不重复查询；通知临时区间的变化也不清空刚统计的入口。
-  watch(
-    () =>
+  const value = shallowRef<ActivityDelta>(),
+    source = shallowRef<CaptureActivity>();
+  const state = useStableRefresh({
+    scope: () =>
       JSON.stringify([
         capture()?.id,
-        capture()?.firstIndex,
         capture()?.clearVersion,
-        delta(),
+        snapshot()?.clearVersion,
+        snapshot()?.mode,
+        readingScope(),
         latestQuery(query()),
         capture()?.marks,
         enabled(),
       ]),
-    refresh,
-    { immediate: true },
-  );
-  onScopeDispose(() => {
-    if (timer) clearTimeout(timer);
-    gate.cancel();
+    signature: () => JSON.stringify([delta(), capture()?.firstIndex]),
+    input: () => {
+      const record = capture(),
+        pending = delta(),
+        original = snapshot();
+      if (!enabled() || !record || !pending?.total) {
+        if (!pending?.total) {
+          value.value = undefined;
+          source.value = undefined;
+        }
+        return;
+      }
+      return {
+        record,
+        pending,
+        original,
+        params: activityWindowParams(pending, query(), record.marks),
+      };
+    },
+    load: async (input, signal) => {
+      if (!input.params)
+        return {
+          ...input.original,
+          captureId: input.record.id,
+          clearVersion: input.original?.clearVersion,
+          total: 0,
+          attention: 0,
+          complete: true,
+          groups: [],
+        } as CaptureActivity;
+      try {
+        return await api<CaptureActivity>(
+          `/api/captures/${input.record.id}/activity-window?${input.params}`,
+          { signal },
+        );
+      } catch (cause) {
+        if (
+          !!cause &&
+          typeof cause === "object" &&
+          "status" in cause &&
+          cause.status === 404
+        )
+          throw new Error("后端缺少活动统计接口（HTTP 404）");
+        throw cause;
+      }
+    },
+    publish: (result, input) => {
+      if (!delta()?.total) {
+        value.value = undefined;
+        source.value = undefined;
+        return;
+      }
+      if (
+        result.captureId !== input.record.id ||
+        result.clearVersion !== input.original?.clearVersion
+      )
+        return;
+      value.value = visibleActivityDelta(input.pending, result);
+      source.value = input.original;
+    },
+    reset: () => {
+      value.value = undefined;
+      source.value = undefined;
+    },
+    delay: 120,
   });
-  return { value, source, loading, error, restartRequired, refresh };
+  const restartRequired = computed(
+    () => !enabled() || state.error.value.includes("HTTP 404"),
+  );
+  const error = computed(() =>
+    !enabled() ? "后端尚未提供活动统计接口" : state.error.value,
+  );
+  return { ...state, value, source, restartRequired, error };
 }

@@ -27,6 +27,7 @@ export function useFieldWatch(
   const items = ref<WatchedField[]>([]),
     busy = ref(false);
   const gate = new RequestGate();
+  let dirty = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   function add(field: FieldColumn, packet?: Packet) {
     if (!packet) throw new Error("请先选中包含该字段的消息");
@@ -74,17 +75,28 @@ export function useFieldWatch(
     schedule();
   }
   function schedule() {
-    if (timer) clearTimeout(timer);
-    gate.cancel();
-    busy.value = false;
+    dirty = true;
+    if (busy.value || timer) return;
     if (!enabled() || !capture() || !items.value.length) return;
-    timer = setTimeout(refresh, 250);
+    timer = setTimeout(() => {
+      timer = undefined;
+      void refresh();
+    }, 250);
   }
   async function refresh() {
+    if (busy.value) {
+      dirty = true;
+      return;
+    }
+    if (timer) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
     const record = capture(),
       to = lastIndex();
     if (!record || to === undefined || !enabled()) return;
     const request = gate.begin();
+    dirty = false;
     busy.value = true;
     const groups = new Map<string, WatchedField[]>();
     for (const item of items.value) {
@@ -94,6 +106,7 @@ export function useFieldWatch(
         item.protocolName,
         item.connection,
         item.direction,
+        item.cursor,
       ]);
       const group = groups.get(key) || [];
       group.push({ ...item });
@@ -157,11 +170,18 @@ export function useFieldWatch(
         }
       }),
     );
-    if (request.current()) busy.value = false;
+    if (request.current()) {
+      busy.value = false;
+      if (dirty) schedule();
+    }
   }
   watch(
-    () => capture()?.id,
+    () => `${capture()?.id}:${capture()?.clearVersion || 0}:${enabled()}`,
     () => {
+      gate.cancel();
+      busy.value = false;
+      if (timer) clearTimeout(timer);
+      timer = undefined;
       items.value = [];
       schedule();
     },

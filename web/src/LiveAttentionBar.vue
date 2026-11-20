@@ -9,6 +9,7 @@ defineProps<{
   activityError?: string;
   loading?: boolean;
   restartRequired?: boolean;
+  updatedAt?: number;
 }>();
 const emit = defineEmits<{
   latest: [];
@@ -59,6 +60,13 @@ const emit = defineEmits<{
             ? "当前筛选下暂无新增消息"
             : "关注协议后可快速查看"
       }}</span>
+      <span
+        v-if="updatedAt"
+        class="muted"
+        :title="`上次统计完成：${new Date(updatedAt).toLocaleString()}`"
+        >{{ loading ? "更新中，保留上次统计" : "已确认统计"
+        }}{{ activityError ? "（刷新失败）" : "" }}</span
+      >
       <button
         v-if="running && !following"
         class="activity-count"
