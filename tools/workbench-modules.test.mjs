@@ -45,6 +45,12 @@ test('拆分后的查询拒绝迟到响应，失败与取消均保留上次成�
   const cancelled=loader.loadMessages(false,false,{query:{...defaultQuery,q:'取消'}})
   loader.cancelQuery();requests[3].resolve({ok:true,json:async()=>({capture:record('b'),items:[],total:0})});await cancelled
   assert.equal(query.rows.value[0].index,20);assert.equal(query.displayedQuery.value.q,'B');assert.equal(loader.loading.value,false)
+  const live=loader.loadMessages(true,true)
+  requests[4].resolve({ok:true,json:async()=>({capture:record('b'),items:[packet(21),packet(20)],total:2})});await live
+  assert.deepEqual([...loader.recentRows.value],[21])
+  const history=loader.loadMessages(false,false)
+  requests[5].resolve({ok:true,json:async()=>({capture:record('b'),items:[packet(21),packet(20)],total:2})});await history
+  assert.equal(loader.recentRows.value.size,0)
  }finally{scope.stop();globalThis.fetch=original}
 })
 

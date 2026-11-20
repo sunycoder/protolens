@@ -156,31 +156,33 @@ const visibleKeys = computed(() =>
           ⋯
         </button></template
       >
-      <p class="muted research-path">{{ path }}</p>
-      <el-button
-        text
-        @click="
-          emit('column', { path, label: label || path });
-          fieldMenu = false;
-        "
-        >添加到列表列</el-button
-      >
-      <el-button
-        text
-        @click="
-          emit('note', path);
-          fieldMenu = false;
-        "
-        >添加 / 编辑批注</el-button
-      >
-      <el-button
-        text
-        @click="
-          emit('watchField', { path, label: label || path });
-          fieldMenu = false;
-        "
-        >关注字段变化</el-button
-      >
+      <div class="field-menu-heading" :title="path">{{ path }}</div>
+      <div class="field-menu-actions">
+        <el-button
+          text
+          @click="
+            emit('column', { path, label: label || path });
+            fieldMenu = false;
+          "
+          >添加到列表列</el-button
+        >
+        <el-button
+          text
+          @click="
+            emit('note', path);
+            fieldMenu = false;
+          "
+          >添加 / 编辑批注</el-button
+        >
+        <el-button
+          text
+          @click="
+            emit('watchField', { path, label: label || path });
+            fieldMenu = false;
+          "
+          >关注字段变化</el-button
+        >
+      </div>
     </el-popover>
   </div>
 </template>

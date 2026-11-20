@@ -210,7 +210,7 @@ const { openCapture, jumpToContext, returnToSearch, saveCapture } =
             ><el-dropdown-item
               :disabled="!analysisProjects || projectBusy"
               @click="exportAnalysisProject"
-              >导出分析项目（含批注与视图）</el-dropdown-item
+              >导出分析项目</el-dropdown-item
             ><el-dropdown-item
               :disabled="!analysisProjects || projectBusy"
               @click="projectInput?.click()"

@@ -176,7 +176,7 @@ defineExpose({ table: packetTable, rowActions });
             :title="`${groupedRepeats.get(row.index)?.[0]?.time} 至 ${groupedRepeats.get(row.index)?.at(-1)?.time}；仅本页；${messageGrouping === 'protocol' ? '同协议组，内容可不同，可能穿插其他协议，代表行只展示一条样本' : '业务内容相同的连续消息'}；展开核对原消息`"
             @click.stop="openGroupPreview(row.index)"
           >
-            {{ expandedRepeats.has(row.index) ? "收起" : "展开" }}
+            {{ expandedRepeats.has(row.index) ? "已展开" : "预览" }}
             {{ messageGrouping === "protocol" ? "组" : "×"
             }}{{ groupedRepeats.get(row.index)?.length }}
           </button></span
@@ -188,7 +188,7 @@ defineExpose({ table: packetTable, rowActions });
       :key="field.path"
       :label="field.label"
       :prop="field.path"
-      :width="workspaceLayout.width('field.label', 150)"
+      :width="workspaceLayout.width(field.path, 150)"
       show-overflow-tooltip
       ><template #default="{ row }"
         ><span :title="field.path">{{
@@ -199,8 +199,7 @@ defineExpose({ table: packetTable, rowActions });
     <el-table-column
       prop="preview"
       label="消息内容摘要"
-      :width="workspaceLayout.widths.value.preview"
-      min-width="220"
+      :min-width="workspaceLayout.width('preview', 220)"
       show-overflow-tooltip
       ><template #default="{ row }"
         ><HighlightedText

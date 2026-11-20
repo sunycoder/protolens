@@ -12,10 +12,14 @@ const open = ref(false),
 watch(
   () => props.dictionary,
   () => {
+    const stored = readStored<Record<string, unknown> | null>(
+      "analyzer.searches.v1",
+      {},
+    );
     items.value = normalizedSearches(
-      readStored<Record<string, unknown>>("analyzer.searches.v1", {})[
-        props.dictionary
-      ],
+      stored && typeof stored === "object"
+        ? stored[props.dictionary]
+        : undefined,
     );
     open.value = false;
   },
@@ -43,8 +47,9 @@ function record() {
   if (q && q.length <= 300) {
     const previous = items.value.find((item) => item.q === q);
     items.value = [
+      ...items.value.filter((item) => item.pinned && item.q !== q),
       { q, pinned: previous?.pinned || false },
-      ...items.value.filter((item) => item.q !== q),
+      ...items.value.filter((item) => !item.pinned && item.q !== q),
     ].slice(0, 20);
     save();
   }
@@ -83,6 +88,7 @@ defineExpose({ record });
         placeholder="协议名、字段名或实际值"
         @keyup.enter="remember"
         @clear="emit('search')"
+        @keydown.esc.stop="open = false"
     /></template>
     <div class="search-history">
       <b>当前字典的最近搜索</b>

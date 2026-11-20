@@ -14,25 +14,30 @@ const emit = defineEmits<{
   maximize: [];
 }>();
 const query = ref(""),
-  position = ref(0);
+  position = ref(-1);
 const result = computed(() => findFieldMatches(props.body, query.value));
 const trail = computed(() => pointerTrail(props.focusedPath));
 watch(
   () => props.messageKey,
   () => {
     query.value = "";
-    position.value = 0;
+    position.value = -1;
     emit("search", "");
   },
 );
 watch(query, (value) => {
-  position.value = 0;
+  position.value = -1;
   emit("search", value);
 });
 function move(delta: number) {
   const matches = result.value.matches;
   if (!matches.length) return;
-  position.value = (position.value + delta + matches.length) % matches.length;
+  position.value =
+    position.value < 0
+      ? delta > 0
+        ? 0
+        : matches.length - 1
+      : (position.value + delta + matches.length) % matches.length;
   emit("focus", matches[position.value].path);
 }
 </script>
@@ -46,30 +51,38 @@ function move(delta: number) {
         placeholder="仅搜索当前消息字段或值"
         aria-label="搜索当前消息"
         @keyup.enter="move(1)"
-      /><span class="muted"
+      /><span class="muted detail-match-count" role="status" aria-live="polite"
         >{{
           result.matches.length
-            ? `${position + 1}/${result.matches.length}`
-            : "0 处"
+            ? position < 0
+              ? `${result.matches.length} 处`
+              : `${position + 1}/${result.matches.length}`
+            : query
+              ? "无匹配"
+              : ""
         }}{{ result.truncated ? "（已截断）" : "" }}</span
       ><el-button
         size="small"
         text
         :disabled="!result.matches.length"
+        aria-label="上一处匹配"
+        title="上一处匹配"
         @click="move(-1)"
-        >上一处</el-button
+        >‹</el-button
       ><el-button
         size="small"
         text
         :disabled="!result.matches.length"
+        aria-label="下一处匹配"
+        title="下一处匹配"
         @click="move(1)"
-        >下一处</el-button
+        >›</el-button
       >
     </div>
     <el-button size="small" @click="emit('maximize')">{{
       maximized ? "恢复分栏" : "放大详情"
     }}</el-button>
-    <nav class="field-breadcrumbs" aria-label="当前字段路径">
+    <nav v-if="focusedPath" class="field-breadcrumbs" aria-label="当前字段路径">
       <template v-for="(item, index) in trail" :key="item.path"
         ><span v-if="index" class="muted">›</span
         ><button

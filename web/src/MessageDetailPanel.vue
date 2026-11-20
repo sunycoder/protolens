@@ -7,6 +7,7 @@ import { IdentityState } from "./domain";
 import JsonTree from "./JsonTree.vue";
 import TextPreview from "./TextPreview.vue";
 import DetailInspectorTools from "./DetailInspectorTools.vue";
+import DetailTabsBar from "./DetailTabsBar.vue";
 const props = defineProps<{
   selection: ReturnType<typeof useMessageSelection>;
   inspector: ReturnType<typeof useMessageInspector>;
@@ -110,95 +111,114 @@ const {
         >消息 #{{ selected.index }} · 协议 ID
         {{ selected.protocolId ?? "未知" }} · {{ selected.direction }} ·
         {{ selected.bytes }} 字节（解压后）</span
-      ><el-button
-        v-if="selected?.protocolId !== undefined"
-        text
-        size="small"
-        @click="openProtocolQuery(true)"
-        >查看协议定义</el-button
       >
-      <el-button v-if="selected" text size="small" @click="copy">{{
-        detailCopy.feedback.value || "复制 JSON"
-      }}</el-button>
-      <el-button
-        v-if="selected"
-        text
-        size="small"
-        @click="neighbour(-1)"
-        :disabled="!hasPrevious || interactiveLoading"
-        >上一条</el-button
-      >
-      <el-button
-        v-if="selected"
-        text
-        size="small"
-        @click="neighbour(1)"
-        :disabled="!hasNext || interactiveLoading"
-        >下一条</el-button
-      >
-      <el-button
-        v-if="selected"
-        text
-        size="small"
-        :loading="comparingPrevious"
-        @click="comparePrevious"
-        >对比上一条同协议</el-button
-      >
-      <el-button v-if="selected" text size="small" @click="editNote('')"
-        >消息批注</el-button
-      >
-      <span
-        v-if="selected"
-        class="muted"
-        :title="`查询 ${queryMetrics.queryMs.toFixed(1)}ms · 等锁 ${queryMetrics.lockWaitMs.toFixed(1)}ms · 快照 ${queryMetrics.snapshotMs.toFixed(1)}ms`"
-        >详情 {{ detailMs.toFixed(0) }}ms</span
-      >
-      <el-popover
-        v-if="selected"
-        trigger="click"
-        placement="bottom-end"
-        :width="340"
-      >
-        <template #reference
-          ><el-button text size="small"
-            >消息对比{{
-              comparisonBase ? ` · #${comparisonBase.index}` : ""
-            }}</el-button
-          ></template
-        >
-        <div class="detail-actions detail-popover">
-          <span class="muted"
-            >{{
-              hasSearchOrigin
-                ? "完整上下文"
-                : hasActiveFilters
-                  ? "当前筛选结果"
-                  : "全部消息"
-            }}
-            · 上一条 / 下一条支持跨页</span
-          >
-          <el-button size="small" @click="setComparisonBase"
-            >设为对比基准</el-button
-          >
+      <div v-if="selected" class="detail-commandbar">
+        <div class="detail-command-group">
           <el-button
-            v-if="comparisonBase"
             size="small"
-            :disabled="
-              comparisonBase.index === selected.index ||
-              selectedRowIndex !== selected.index
+            :disabled="selected.protocolId === undefined"
+            :title="
+              selected.protocolId === undefined
+                ? '此消息没有协议 ID'
+                : '查看当前字典中的协议定义'
             "
-            @click="emit('compare')"
-            >与 #{{ comparisonBase.index }} 对比变化</el-button
+            @click="openProtocolQuery(true)"
+            >协议定义</el-button
           >
-          <el-button
-            v-if="comparisonBase"
-            text
-            size="small"
-            @click="comparisonBase = undefined"
-            >清除基准</el-button
+          <el-button size="small" @click="copy">{{
+            detailCopy.feedback.value || "复制 JSON"
+          }}</el-button>
+        </div>
+        <div class="detail-command-group" aria-label="消息导航">
+          <el-tooltip
+            :content="
+              interactiveLoading
+                ? '正在查询，请稍候'
+                : '当前结果中没有上一条；可先定位此消息'
+            "
+            :disabled="hasPrevious && !interactiveLoading"
+            ><span
+              ><el-button
+                size="small"
+                :disabled="!hasPrevious || interactiveLoading"
+                @click="neighbour(-1)"
+                >上一条</el-button
+              ></span
+            ></el-tooltip
+          >
+          <el-tooltip
+            :content="
+              interactiveLoading
+                ? '正在查询，请稍候'
+                : '当前结果中没有下一条；可先定位此消息'
+            "
+            :disabled="hasNext && !interactiveLoading"
+            ><span
+              ><el-button
+                size="small"
+                :disabled="!hasNext || interactiveLoading"
+                @click="neighbour(1)"
+                >下一条</el-button
+              ></span
+            ></el-tooltip
           >
         </div>
-      </el-popover>
+        <el-dropdown trigger="click" placement="bottom-end">
+          <el-button size="small">更多操作</el-button>
+          <template #dropdown
+            ><el-dropdown-menu>
+              <el-dropdown-item @click="editNote('')"
+                >消息批注</el-dropdown-item
+              >
+              <el-dropdown-item
+                :disabled="
+                  comparingPrevious ||
+                  !selected.connection ||
+                  !selected.direction ||
+                  (selected.protocolId === undefined && !selected.protocolName)
+                "
+                @click="comparePrevious"
+                >对比上一条同协议</el-dropdown-item
+              >
+              <el-dropdown-item divided @click="setComparisonBase"
+                >设为对比基准</el-dropdown-item
+              >
+              <el-dropdown-item
+                v-if="comparisonBase"
+                :disabled="
+                  comparisonBase.index === selected.index ||
+                  selectedRowIndex !== selected.index
+                "
+                @click="emit('compare')"
+                >与 #{{ comparisonBase.index }} 对比</el-dropdown-item
+              >
+              <el-dropdown-item
+                v-if="comparisonBase"
+                @click="comparisonBase = undefined"
+                >清除对比基准</el-dropdown-item
+              >
+            </el-dropdown-menu></template
+          >
+        </el-dropdown>
+        <el-tooltip
+          :content="
+            '详情 ' +
+            detailMs.toFixed(0) +
+            'ms · 查询 ' +
+            queryMetrics.queryMs.toFixed(1) +
+            'ms · 等锁 ' +
+            queryMetrics.lockWaitMs.toFixed(1) +
+            'ms'
+          "
+          ><span class="muted detail-scope">{{
+            hasSearchOrigin
+              ? "上下文"
+              : hasActiveFilters
+                ? "筛选结果"
+                : "全部消息"
+          }}</span></el-tooltip
+        >
+      </div>
       <span v-if="!selected && detailTarget" class="muted detail-meta"
         >目标：消息 #{{ detailTarget.index }} · 协议 ID
         {{ detailTarget.protocolId ?? "未知" }}</span
@@ -261,11 +281,7 @@ const {
       <p v-if="capture?.operationContext" class="muted operation-context">
         操作背景：{{ capture.operationContext }}
       </p>
-      <details
-        v-if="detailQuery && selected"
-        class="field-matches"
-        :open="fieldMatches.matches.length > 0"
-      >
+      <details v-if="detailQuery && selected" class="field-matches">
         <summary>
           搜索“{{ detailQuery }}”：消息体命中
           {{ fieldMatches.matches.length }} 个字段{{
@@ -303,7 +319,8 @@ const {
       >
         消息批注：{{ fieldAnnotations[""] }}
       </p>
-      <el-tabs v-model="tab" class="detail-tabs">
+      <DetailTabsBar v-model="tab" />
+      <el-tabs v-model="tab" class="detail-tabs custom-detail-tabs">
         <el-tab-pane label="JSON 树" name="tree"
           ><div v-if="tab === 'tree'" class="detail-content">
             <JsonTree

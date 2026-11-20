@@ -1255,15 +1255,16 @@ pre {
   overflow-wrap: anywhere;
   color: var(--primary);
 }
-.json-value-format {
-  width: 140px;
-  vertical-align: middle;
+.json-format-trigger.el-button {
+  margin: 0 0 0 4px;
+  height: 20px;
+  padding: 0 4px;
   opacity: 0;
+  vertical-align: middle;
 }
-.json-leaf:hover .json-value-format,
-.json-value-format:focus-within,
-.json-value-format.is-open,
-.json-value-format.is-converted {
+.json-leaf:hover .json-format-trigger,
+.json-format-trigger:focus-visible,
+.json-format-trigger.is-active {
   opacity: 1;
 }
 .json-converted {
@@ -1408,13 +1409,25 @@ pre {
 .recent-row:not(.located-row) td:first-child {
   animation: message-arrived 1.8s ease-out;
 }
+.packet-table .el-table__body tr.recent-row:not(.located-row) > td {
+  animation: message-arrived-fill 1.8s ease-out;
+}
 @keyframes message-arrived {
   from {
-    box-shadow: inset 3px 0 var(--primary);
-    background: var(--soft);
+    box-shadow: inset 4px 0 var(--primary);
+    color: var(--primary);
   }
   to {
     box-shadow: inset 0 0 transparent;
+  }
+}
+@keyframes message-arrived-fill {
+  0%,
+  25% {
+    background-color: var(--el-color-primary-light-7);
+  }
+  100% {
+    background-color: var(--surface);
   }
 }
 .detail-reading-banner,
@@ -1452,7 +1465,102 @@ pre {
 }
 @media (prefers-reduced-motion: reduce) {
   .recent-row td:first-child,
+  .packet-table .el-table__body tr.recent-row > td,
   .json-focused {
     animation: none;
   }
+  .packet-table .el-table__body tr.recent-row > td {
+    background: var(--el-color-primary-light-7);
+  }
+  .packet-table .el-table__body tr.recent-row > td:first-child {
+    box-shadow: inset 4px 0 var(--primary);
+  }
+}
+
+/* 详情工具允许输入框收缩，计数和命令保持完整；正文独占剩余高度。 */
+.detail-commandbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 0;
+}
+.detail-command-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.detail-commandbar .el-button {
+  margin: 0;
+}
+.detail-scope {
+  font-size: 11px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+.detail-local-search {
+  min-width: 0;
+  gap: 4px;
+}
+.detail-local-search .el-input {
+  flex: 1;
+  min-width: 80px;
+  max-width: none;
+}
+.detail-local-search > .el-button {
+  margin: 0;
+  flex-shrink: 0;
+  padding: 3px 7px;
+}
+.detail-match-count {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.detail-inspector-tools > .el-button {
+  margin: 0;
+  flex-shrink: 0;
+}
+.custom-detail-tabs > .el-tabs__header {
+  display: none;
+}
+.detail-panel > :not(.detail-tabs) {
+  flex-shrink: 0;
+}
+.field-menu-heading {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 2px 8px 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.field-menu-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.field-menu-actions .el-button {
+  margin: 0;
+  justify-content: flex-start;
+  height: 32px;
+}
+.action-menu-divider {
+  border-top: 1px solid var(--border);
+  margin: 4px 0;
+}
+.el-popover.el-popper {
+  max-width: calc(100vw - 24px);
+}
+.search-history {
+  max-height: min(360px, 60vh);
+  overflow: auto;
+}
+.field-breadcrumbs {
+  scrollbar-width: thin;
+  flex-shrink: 0;
 }

@@ -17,6 +17,7 @@ watch(
     limit.value = SCALAR_PREVIEW_LENGTH;
     inlineCopy.reset();
     format.value = "raw";
+    formatOpen.value = false;
   },
 );
 async function copyValue() {
@@ -54,22 +55,41 @@ async function copyValue() {
     >
       {{ inlineCopy.feedback.value || "复制值" }}
     </button>
-    <el-select
+    <el-popover
       v-if="typeof value === 'number' || typeof value === 'string'"
-      v-model="format"
-      class="json-value-format"
-      :class="{ 'is-converted': format !== 'raw', 'is-open': formatOpen }"
-      @visible-change="formatOpen = $event"
-      size="small"
-      aria-label="字段显示格式"
-      @click.stop
+      v-model:visible="formatOpen"
+      trigger="click"
+      placement="bottom-start"
+      :width="210"
+      :persistent="false"
     >
-      <el-option value="raw" label="原值" />
-      <el-option value="hex" label="十六进制" />
-      <el-option value="bytes" label="字节数" />
-      <el-option value="unixms" label="时间戳（毫秒）" />
-      <el-option value="unixs" label="时间戳（秒）" />
-    </el-select>
+      <template #reference
+        ><el-button
+          text
+          size="small"
+          class="json-format-trigger"
+          :class="{ 'is-active': formatOpen || format !== 'raw' }"
+          aria-label="选择字段显示格式"
+          @click.stop
+          >{{ format === "raw" ? "格式" : "已转换" }}</el-button
+        ></template
+      >
+      <div class="field-menu-heading">字段显示格式</div>
+      <el-select
+        v-if="formatOpen"
+        v-model="format"
+        size="small"
+        aria-label="字段显示格式"
+        style="width: 100%"
+        @change="formatOpen = false"
+      >
+        <el-option value="raw" label="原值" />
+        <el-option value="hex" label="十六进制" />
+        <el-option value="bytes" label="字节数" />
+        <el-option value="unixms" label="时间戳（毫秒）" />
+        <el-option value="unixs" label="时间戳（秒）" />
+      </el-select>
+    </el-popover>
     <span v-if="converted" class="json-converted"> → {{ converted }}</span>
   </span>
 </template>

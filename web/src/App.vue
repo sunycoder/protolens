@@ -262,7 +262,11 @@ const workbenchLayout = useWorkbenchLayout({
   scrollTop: tableScrollTop,
   selectedRow: () =>
     rows.value.find((item) => item.index === selectedRowIndex.value),
-  resetFilterPresentation: () => (expandedTags.value = false),
+  resetFilterPresentation: () => {
+    expandedTags.value = false;
+    workspaceLayout.reset();
+    workspaceLayout.maximized.value = false;
+  },
 });
 const {
   columns,
@@ -280,6 +284,9 @@ const {
   resetLayout,
 } = workbenchLayout;
 
+watch(detailVisible, (visible) => {
+  if (!visible) workspaceLayout.maximized.value = false;
+});
 const busy = ref(false);
 const health = ref({
   ready: false,

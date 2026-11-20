@@ -88,24 +88,42 @@ function start(event: PointerEvent) {
     startSize = size.value;
   const oldSelection = document.body.style.userSelect;
   document.body.style.userSelect = "none";
-  const move = (value: PointerEvent) =>
-    assign(
+  // 拖动只移动预览线，松手一次提交尺寸，避免大 JSON 与表格在每个 pointermove 中重排。
+  let pendingSize = startSize,
+    frame = 0;
+  const paint = () => {
+    frame = 0;
+    root.value?.style.setProperty("--split-preview", `${pendingSize}px`);
+  };
+  paint();
+  const move = (value: PointerEvent) => {
+    pendingSize = constrainSplit(
+      available.value,
       startSize + (vertical.value ? value.clientY : value.clientX) - startPoint,
+      props.minimumPrimary,
+      props.minimumSecondary,
     );
+    if (!frame) frame = requestAnimationFrame(paint);
+  };
   const end = () => {
+    assign(pendingSize);
     stopGesture();
     save();
   };
   stopGesture = () => {
     dragging.value = false;
+    if (frame) cancelAnimationFrame(frame);
+    root.value?.style.removeProperty("--split-preview");
     document.body.style.userSelect = oldSelection;
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", end);
-    window.removeEventListener("pointercancel", end);
+    window.removeEventListener("pointercancel", stopGesture);
+    window.removeEventListener("blur", stopGesture);
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", end, { once: true });
-  window.addEventListener("pointercancel", end, { once: true });
+  window.addEventListener("pointercancel", stopGesture, { once: true });
+  window.addEventListener("blur", stopGesture, { once: true });
 }
 function key(event: KeyboardEvent) {
   const backward = vertical.value ? "ArrowUp" : "ArrowLeft",
@@ -183,6 +201,7 @@ onBeforeUnmount(() => {
     }"
   >
     <div class="split-inner" :style="innerStyle">
+      <div v-if="dragging" class="split-preview" aria-hidden="true"></div>
       <div class="split-primary" :style="primaryStyle">
         <slot name="primary" />
       </div>
@@ -196,7 +215,7 @@ onBeforeUnmount(() => {
         :aria-valuenow="Math.round(size)"
         :aria-valuemin="minimumPrimary"
         :aria-valuemax="Math.round(available - minimumSecondary)"
-        :title="`${label}；双击恢复默认，方向键微调`"
+        :title="`${label}；拖动预览，松开应用；双击恢复默认，方向键微调`"
         @pointerdown="start"
         @keydown="key"
         @dblclick="reset"
@@ -234,6 +253,7 @@ onBeforeUnmount(() => {
   box-shadow: -6px 0 20px #0002;
 }
 .split-inner {
+  position: relative;
   display: flex;
   width: 100%;
   height: 100%;
@@ -257,6 +277,31 @@ onBeforeUnmount(() => {
 }
 .split-secondary {
   flex: 1;
+}
+.secondary-collapsed > .split-inner > .split-primary {
+  flex: 1 1 100%;
+  width: 100%;
+}
+.secondary-collapsed > .split-inner > .split-secondary {
+  display: none !important;
+}
+.split-preview {
+  position: absolute;
+  inset: 0 auto 0 var(--split-preview);
+  width: 3px;
+  background: var(--primary);
+  box-shadow: 0 0 0 2px var(--soft);
+  z-index: 30;
+  pointer-events: none;
+}
+.vertical .split-preview {
+  inset: var(--split-preview) 0 auto;
+  width: auto;
+  height: 3px;
+}
+.dragging .split-primary,
+.dragging .split-secondary {
+  pointer-events: none;
 }
 .split-primary > :deep(*),
 .split-secondary > :deep(*) {

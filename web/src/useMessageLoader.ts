@@ -178,6 +178,10 @@ export function useMessageLoader(options: {
           () => (recentRows.value = new Set()),
           1800,
         );
+      } else {
+        // 主动查询历史或切换记录后，旧的新增提示不能落在本次结果上。
+        if (recentRowsTimer) clearTimeout(recentRowsTimer);
+        recentRows.value = new Set();
       }
       rows.value = reconcileRows(rows.value, result.items);
       emptyReasons.value = result.emptyReasons || [];
