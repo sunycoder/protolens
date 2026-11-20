@@ -833,6 +833,14 @@ public final class CaptureStore {
     /** 页面可请求同刻活动快照，MCP 等既有查询默认不携带累计协议统计，保持结果预算。 */
     public ObjectNode messages(String id, MessageQuery query, boolean includeActivity)
             throws IOException {
+        return messages(id, query, includeActivity, "[]", false);
+    }
+
+    /** 字段投影与折叠仅作用当前页，旧查询契约默认不增加额外计算。 */
+    public ObjectNode messages(
+            String id, MessageQuery query, boolean includeActivity, String fields, boolean fold)
+            throws IOException {
+        var paths = new CaptureAnalysisQuery(mapper).fields(fields);
         long started = System.nanoTime();
         ObjectNode capture;
         ObjectNode metadata;
@@ -859,7 +867,7 @@ public final class CaptureStore {
                             : null;
             released = System.nanoTime();
         }
-        ObjectNode result = messageQuery.messages(capture, query, metadata);
+        ObjectNode result = messageQuery.messages(capture, query, metadata, paths, fold);
         if (includeActivity) {
             result.set(
                     "activity",
@@ -901,6 +909,27 @@ public final class CaptureStore {
             view = queryView(id);
         }
         return messageQuery.activityWindow(view, query).put("captureId", id);
+    }
+
+    /** 用户主动分析使用稳定保留视图；不持有仓库锁扫描正文。 */
+    public ObjectNode analyze(String id, MessageQuery query, String fields) throws IOException {
+        var analysis = new CaptureAnalysisQuery(mapper);
+        var paths = analysis.fields(fields);
+        ObjectNode view;
+        synchronized (this) {
+            view = queryView(id);
+        }
+        return analysis.analyze(view, query, paths);
+    }
+
+    /** 时间定位同样在锁外执行，并沿用当前筛选，不加载或改写其他记录。 */
+    public ObjectNode locateTime(String id, MessageQuery query, String time, int seconds)
+            throws IOException {
+        ObjectNode view;
+        synchronized (this) {
+            view = queryView(id);
+        }
+        return new CaptureTimeQuery(mapper).locate(view, query, time, seconds);
     }
 
     /** 同连接、方向、协议的后续消息，只统计当前保留范围；不要求旧详情消息仍在缓存中。 */

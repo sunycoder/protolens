@@ -1,5 +1,5 @@
 import { onScopeDispose, ref, shallowRef, watch } from "vue";
-import { api, type Capture } from "./types.ts";
+import { api, ApiError, type Capture } from "./types.ts";
 import { RequestGate } from "./workspaceRefresh.ts";
 import {
   activityWindowParams,
@@ -16,11 +16,13 @@ export function useActivityWindow(
   delta: () => ActivityDelta | undefined,
   query: () => WorkspaceQuery,
   snapshot: () => CaptureActivity | undefined,
+  enabled: () => boolean = () => true,
 ) {
   const value = shallowRef<ActivityDelta>();
   const source = shallowRef<CaptureActivity>();
   const loading = ref(false);
   const error = ref("");
+  const restartRequired = ref(false);
   const gate = new RequestGate();
   let timer: ReturnType<typeof setTimeout> | undefined;
   function refresh() {
@@ -32,7 +34,13 @@ export function useActivityWindow(
     value.value = undefined;
     source.value = undefined;
     error.value = "";
+    restartRequired.value = false;
     loading.value = false;
+    if (!enabled()) {
+      restartRequired.value = true;
+      error.value = "后端尚未提供活动统计接口";
+      return;
+    }
     if (!record || !pending || !pending.total) return;
     const params = activityWindowParams(pending, query(), record.marks);
     if (!params) {
@@ -62,7 +70,11 @@ export function useActivityWindow(
         value.value = visibleActivityDelta(pending, result);
         source.value = original;
       } catch (cause) {
-        if (request.current()) error.value = String(cause);
+        if (request.current()) {
+          restartRequired.value =
+            cause instanceof ApiError && cause.status === 404;
+          error.value = String(cause);
+        }
       } finally {
         if (request.current()) loading.value = false;
       }
@@ -78,6 +90,7 @@ export function useActivityWindow(
         delta(),
         latestQuery(query()),
         capture()?.marks,
+        enabled(),
       ]),
     refresh,
     { immediate: true },
@@ -86,5 +99,5 @@ export function useActivityWindow(
     if (timer) clearTimeout(timer);
     gate.cancel();
   });
-  return { value, source, loading, error, refresh };
+  return { value, source, loading, error, restartRequired, refresh };
 }

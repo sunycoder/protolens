@@ -18,12 +18,12 @@
 
 | 系统 | 安装包 | 便携版 |
 | --- | --- | --- |
-| Windows x64 | [下载 ProtoLens-latest.exe](https://github.com/sunycoder/protolens/releases/download/v0.1.6/ProtoLens-latest.exe) | [下载 Windows ZIP](https://github.com/sunycoder/protolens/releases/download/v0.1.6/ProtoLens-0.1.6-windows-x64.zip) |
-| macOS Apple Silicon | [下载 Apple Silicon DMG](https://github.com/sunycoder/protolens/releases/download/v0.1.6/ProtoLens-0.1.6-macos-arm64.dmg) | [下载 Apple Silicon 便携包](https://github.com/sunycoder/protolens/releases/download/v0.1.6/ProtoLens-0.1.6-macos-arm64.tar.gz) |
-| macOS Intel | [下载 Intel DMG](https://github.com/sunycoder/protolens/releases/download/v0.1.6/ProtoLens-0.1.6-macos-x64.dmg) | [下载 Intel 便携包](https://github.com/sunycoder/protolens/releases/download/v0.1.6/ProtoLens-0.1.6-macos-x64.tar.gz) |
-| Linux x64 | [下载 Linux tar.gz](https://github.com/sunycoder/protolens/releases/download/v0.1.6/ProtoLens-0.1.6-linux-x64.tar.gz) | 同一文件 |
+| Windows x64 | [下载 ProtoLens-latest.exe](https://github.com/sunycoder/protolens/releases/download/v0.1.7/ProtoLens-latest.exe) | [下载 Windows ZIP](https://github.com/sunycoder/protolens/releases/download/v0.1.7/ProtoLens-0.1.7-windows-x64.zip) |
+| macOS Apple Silicon | [下载 Apple Silicon DMG](https://github.com/sunycoder/protolens/releases/download/v0.1.7/ProtoLens-0.1.7-macos-arm64.dmg) | [下载 Apple Silicon 便携包](https://github.com/sunycoder/protolens/releases/download/v0.1.7/ProtoLens-0.1.7-macos-arm64.tar.gz) |
+| macOS Intel | [下载 Intel DMG](https://github.com/sunycoder/protolens/releases/download/v0.1.7/ProtoLens-0.1.7-macos-x64.dmg) | [下载 Intel 便携包](https://github.com/sunycoder/protolens/releases/download/v0.1.7/ProtoLens-0.1.7-macos-x64.tar.gz) |
+| Linux x64 | [下载 Linux tar.gz](https://github.com/sunycoder/protolens/releases/download/v0.1.7/ProtoLens-0.1.7-linux-x64.tar.gz) | 同一文件 |
 
-当前发布版本：`v0.1.6`。macOS DMG 和对应架构的便携包均内置运行环境；旧版 `v0.1.5` 的 macOS tar.gz 是需要 Java 21 的命令行启动包，不要与新的原生应用包混用。
+当前发布版本：`v0.1.7`。macOS DMG 和对应架构的便携包均内置运行环境；旧版 `v0.1.5` 的 macOS tar.gz 是需要 Java 21 的命令行启动包，不要与新的原生应用包混用。
 
 **Windows 安装版**：运行下载的 `ProtoLens-latest.exe`，安装后打开快捷方式；便携版解压整个 ZIP 后运行 `ProtoLens/ProtoLens.exe`，无需另装 Java、Node 或采集器。
 
@@ -58,13 +58,15 @@
 
 ## 使用流程
 
+新增分析工作区包含兼容检查、保留范围、字段关注、操作回顾、账号归组、自定义字段列、重复折叠、时间定位、批注、格式切换、操作对照和临时页签等 16 项交互优化，入口与边界见 [抓包分析工作区](docs/analysis-workspace.md)。
+
 ### 实时采集
 
 1. **加载协议**：打开“设置 / 协议加载”，填写客户端根目录、任意分包目录或 `thrift_data.js` 完整路径，点击“查找协议文件”→选择版本→“加载协议并记住路径”。默认来源有效时启动自动加载；来源缺失时可启动后补填。
 2. **首次信任证书**：在“连接与诊断”查看实际公开证书路径，默认位于数据目录的 `mitmproxy-conf/mitmproxy-ca-cert.cer`，按下表导入。源码版与发行包的数据目录不同；不要导入或分享同目录内的私钥。
 3. **配置代理**：按下表为游戏使用的网络配置 HTTP 和 HTTPS 代理，地址 `127.0.0.1`，端口以页面为准，默认 `18888`。Windows 和 macOS 可点击顶部“接管系统代理”。macOS 按系统提示授权，只接管当前联网的单个网络服务；切换网络后先恢复再接管。
 4. **开始采集**：页面点击“开始采集”。程序不保证识别 VPN，也不会关闭其 TUN 模式，是否暂停 TUN 由用户决定。
-5. **操作并查看**：完全关闭并重新打开小游戏，再执行目标操作。搜索协议（例如 `CgAllianceTechDonate`），点击消息查看字段；CS 为客户端发送，SC 为服务端下发。默认点选消息暂停跟随；关闭“选中消息后暂停跟随”后可继续追新，“回到最新”恢复列表跟随。
+5. **操作并查看**：完全关闭并重新打开小游戏，再执行目标操作。搜索协议（例如 `CgAllianceTechDonate`），点击消息查看字段；CS 为客户端发送，SC 为服务端下发。默认点选消息暂停跟随；在“点击消息时”选择“继续刷新，固定详情”后可继续追新，“回到最新”恢复列表跟随。
 6. **保存与退出**：停止采集时自行选择是否保存，也可保存操作区间快照；未保存的记录退出后丢失。正常退出工作台时尝试恢复接管前的代理；macOS 在本次运行中复用网络授权，系统撤销或授权失效时仍需重新确认。其他软件已改过代理时保留它的新设置。旧版手动代理若已指向采集端口，确认接管后退出会关闭该遗留手动代理，无法恢复未知的更早 VPN 配置。关闭浏览器不会停止后端。
 
 | 系统 | 信任公开 CA 证书 | 配置与恢复代理 |
@@ -83,7 +85,7 @@
 
 **搜索与上下文**：协议 ID 表示协议类型；消息序号表示该条消息在抓包记录中的原始顺序，两者分别查询。点击搜索结果的协议名或“上下文”，可查看附近消息；目标行会滚动到可见位置并整行高亮。“返回搜索结果”恢复原查询、筛选、排序、页码和滚动位置。筛选会暂停列表跟随，后台采集继续。
 
-**实时阅读与固定详情**：顶部“跟随新消息”控制列表追新，“选中消息后暂停跟随”控制点击消息的习惯，默认开启并在本机记住；关闭后点击只打开固定详情，列表继续刷新。滚动、触摸滑动及拖动滚动条保留跟随勾选；翻页、筛选或打开消息菜单会暂停列表，后台采集继续；阅读状态显示暂停原因，点击“回到最新”恢复。已打开的详情不会因新消息或缓存淘汰而被替换；消息不在列表或已淘汰时明确提示，保留内容仍可查看和复制。
+**实时阅读与固定详情**：顶部“跟随新消息”控制列表追新，“点击消息时”独立选择“暂停列表”或“继续刷新，固定详情”，默认暂停列表并在本机记住；它是点击行为设置，不代表当前已经暂停。滚动、触摸滑动及拖动滚动条保留跟随勾选；翻页、筛选或打开消息菜单会暂停列表，后台采集继续；阅读状态显示暂停原因，点击“回到最新”恢复。已打开的详情不会因新消息或缓存淘汰而被替换；消息不在列表或已淘汰时明确提示，保留内容仍可查看和复制。
 
 **新增消息与关注**：活动条按当前列表筛选统计仍可查看的新增条数、协议种类、本记录首次出现及需关注消息（部分解码、失败、未映射）；隐藏心跳、协议排除、方向和内容搜索同样生效。只有被筛掉的消息到达时显示“当前筛选下暂无新增消息”，不提供空的“待查看”入口；通知自身的临时消息区间不阻止统计后来到达的消息。点击“待查看”保留已有筛选，只定位到通知的固定原消息区间；“首次出现”和“需关注”额外设置对应分类条件，原条件可撤销恢复。“回到最新”或重新勾选跟随会解除通知临时区间，保留其他筛选。累计统计跨缓存淘汰和清空保留已见协议，可查看数量只包含保留消息；范围缺失时标注不完整，不推断“首次”。协议名称左侧星标可关注最多 24 种协议，按字典版本保存；关注项的累计新增数独立于列表筛选和跟随，点击查看后确认，不会因连接备注或元数据刷新而重置。
 
@@ -205,7 +207,7 @@ macOS / Linux 使用 `sh` 运行脚本，不依赖下载或拷贝后是否保留
   "-PanalyzerWixDir=C:/Program Files (x86)/WiX Toolset v3.14/bin" `
   "-PanalyzerNodeExecutable=D:/dev/Node/node.exe" `
   "-PanalyzerMitmdumpExecutable=D:/tools/mitmproxy/mitmdump.exe" `
-  -PanalyzerVersion=0.1.6
+  -PanalyzerVersion=0.1.7
 ```
 
 macOS / Linux 使用同名 Gradle 属性和本机程序路径，使用 POSIX 换行符，例如：

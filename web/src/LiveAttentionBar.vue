@@ -8,6 +8,7 @@ defineProps<{
   watched: { token: string; label: string; unread: number }[];
   activityError?: string;
   loading?: boolean;
+  restartRequired?: boolean;
 }>();
 const emit = defineEmits<{
   latest: [];
@@ -51,7 +52,7 @@ const emit = defineEmits<{
           >统计范围不完整，首次出现未推断</span
         >
       </template>
-      <span v-else class="muted">{{
+      <span v-else-if="!activityError" class="muted">{{
         loading
           ? "正在统计当前筛选下的新消息"
           : running
@@ -66,7 +67,11 @@ const emit = defineEmits<{
         回到最新
       </button>
       <span v-if="activityError" class="muted" :title="activityError"
-        >活动统计暂不可用
+        >{{
+          restartRequired
+            ? "后端缺少活动统计接口，请先保存临时抓包并重启工作台"
+            : "活动统计暂不可用，新增数量尚未确认"
+        }}
         <button class="activity-count" @click="emit('retry')">
           重试
         </button></span

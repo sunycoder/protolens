@@ -26,6 +26,28 @@ public final class CaptureController {
     }
 
     public void register(Router router) {
+        router.get("/api/captures/:id/time-location")
+                .handler(
+                        context ->
+                                http.worker(
+                                        context,
+                                        () ->
+                                                captures.locateTime(
+                                                        context.pathParam("id"),
+                                                        query(context),
+                                                        context.request().getParam("time", ""),
+                                                        integer(context, "seconds", 0))));
+        router.get("/api/captures/:id/analysis")
+                .handler(
+                        context ->
+                                http.worker(
+                                        context,
+                                        () ->
+                                                captures.analyze(
+                                                        context.pathParam("id"),
+                                                        query(context),
+                                                        context.request()
+                                                                .getParam("fields", "[]"))));
         router.get("/api/captures/:id/activity-window")
                 .handler(
                         context ->
@@ -169,7 +191,13 @@ public final class CaptureController {
                                                 captures.messages(
                                                         context.pathParam("id"),
                                                         query(context),
-                                                        true)));
+                                                        true,
+                                                        context.request().getParam("fields", "[]"),
+                                                        Boolean.parseBoolean(
+                                                                context.request()
+                                                                        .getParam(
+                                                                                "fold",
+                                                                                "false")))));
         router.get("/api/captures/:id/messages/:index")
                 .handler(
                         context ->

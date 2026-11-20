@@ -53,6 +53,8 @@ export interface Capture {
   lastIndex?: number;
 }
 export interface Packet {
+  fieldValues?: Record<string, string>;
+  repeatOf?: number;
   connectionIdentity?: ConnectionIdentity;
   index: number;
   direction: string;
@@ -92,11 +94,30 @@ export interface Page {
   capture: Capture;
   offset?: number;
 }
+/** 保留 HTTP 状态，使页面能区分旧后端缺少接口与普通网络/业务错误。 */
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
 export async function api<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
-  const data = await response.json();
+  let data;
+  try {
+    data = await response.json();
+  } catch (cause) {
+    // 旧后端的未知接口可能返回纯文本；不能把 404 丢失成 JSON 解析异常。
+    if (!response.ok)
+      throw new ApiError(response.status, `请求失败 ${response.status}`);
+    throw cause;
+  }
   if (!response.ok)
-    throw new Error(data.error || `请求失败 ${response.status}`);
+    throw new ApiError(
+      response.status,
+      data.error || `请求失败 ${response.status}`,
+    );
   return data;
 }
 export function post<T>(url: string, value: unknown) {

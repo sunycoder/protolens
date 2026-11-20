@@ -11,6 +11,7 @@ import {
 import { IdentityState, DecodeStatus, MessageDirection } from "./domain";
 import {
   computed,
+  defineAsyncComponent,
   nextTick,
   onBeforeUnmount,
   onMounted,
@@ -20,6 +21,20 @@ import {
 } from "vue";
 import { ElMessage, ElMessageBox, type TableInstance } from "element-plus";
 import JsonTree from "./JsonTree.vue";
+import { useResearchNotes } from "./useResearchNotes";
+import { useFieldWatch } from "./useFieldWatch";
+import {
+  foldRows,
+  groupedMessageRows,
+  type MessageGrouping,
+  repeatGroups,
+  recordGroups,
+  exitTemporaryQuery,
+  MAX_ANALYSIS_TABS,
+  type FieldColumn,
+  type MessageNote,
+} from "./analysisTools";
+const ResearchPanel = defineAsyncComponent(() => import("./ResearchPanel.vue"));
 import SplitPane from "./SplitPane.vue";
 import LiveCapturePanel from "./LiveCapturePanel.vue";
 import ConnectionIdentityPanel from "./ConnectionIdentityPanel.vue";
@@ -108,6 +123,43 @@ function identityChanged(updated: Capture) {
   if (capture.value?.id === updated.id) capture.value = updated;
 }
 const capture = shallowRef<Capture>();
+const research = useResearchNotes(() => capture.value);
+const groupedRecords = computed(() => recordGroups(captures.value));
+const researchOpen = ref(false),
+  researchMode = ref("review");
+const lastOperationRange = ref<{ from: number; to: number }>();
+const messageGrouping = ref<MessageGrouping>("none");
+const foldRepeats = computed(() => messageGrouping.value !== "none");
+const expandedRepeats = ref(new Set<number>());
+const temporaryView = shallowRef<{
+  name: string;
+  origin: WorkspaceQuery;
+  applied: WorkspaceQuery;
+}>();
+const noteDialog = ref(false);
+const noteDraft = ref<MessageNote>({
+  index: 0,
+  path: "",
+  text: "",
+  kind: "备注",
+});
+const analysisTabs = ref<
+  {
+    id: number;
+    name: string;
+    place?: ReadingPlace;
+    following: boolean;
+    field: string;
+    temporary?: {
+      name: string;
+      origin: WorkspaceQuery;
+      applied: WorkspaceQuery;
+    };
+  }[]
+>([]);
+const activeAnalysisTab = ref(0);
+let analysisTabSequence = 0;
+let switchingAnalysisTab = false;
 const {
   rows,
   total,
@@ -162,7 +214,10 @@ const detailDock = ref<DetailLayout>(
     : "auto",
 );
 const listWidth = computed(
-  () => listMinimumWidth(columns.value) + (batchExcluding.value ? 36 : 0),
+  () =>
+    listMinimumWidth(columns.value) +
+    research.columns.value.length * 150 +
+    (batchExcluding.value ? 36 : 0),
 );
 const effectiveLayout = computed(() =>
   chooseDetailLayout(
@@ -206,6 +261,9 @@ watch([detailDirection, detailVisible, sidebarVisible], async () => {
 });
 const health = ref({
   ready: false,
+  apiVersion: 0,
+  analysisTools: false,
+  activityWindow: false,
   catalog: {
     messageCount: 0,
     definitionCount: 0,
@@ -214,6 +272,9 @@ const health = ref({
     sourceRoot: "",
   },
 });
+const supportsAnalysis = computed(
+  () => health.value.apiVersion === 2 && health.value.analysisTools,
+);
 const search = ref("");
 const protocolId = ref("");
 const messageIndex = ref("");
@@ -508,7 +569,15 @@ async function endOperation() {
       to: item.lastIndex!,
       context: "",
     };
-    markDialog.value = true;
+    lastOperationRange.value = {
+      from: operation.value.from,
+      to: operation.value.to,
+    };
+    operationStart.value = undefined;
+    if (supportsAnalysis.value) {
+      markDialog.value = false;
+      openResearch("review");
+    } else markDialog.value = true;
   } catch (error) {
     failure(error);
   }
@@ -632,7 +701,279 @@ function readingPlace(): ReadingPlace | undefined {
 function saveReadingPlace() {
   if (restoringSession || loading.value) return;
   const place = readingPlace();
-  if (place) writeStored("analyzer.reading.v1", place);
+  if (place) {
+    writeStored("analyzer.reading.v1", place);
+    if (!switchingAnalysisTab) {
+      const current = analysisTabs.value.find(
+        (item) => item.id === activeAnalysisTab.value,
+      );
+      if (current) {
+        current.place = place;
+        current.following = autoFollow.value;
+        current.field = focusedField.value;
+        current.temporary = temporaryView.value;
+      }
+    }
+  }
+}
+watch(
+  () => capture.value?.id,
+  () => {
+    analysisTabs.value = [
+      {
+        id: ++analysisTabSequence,
+        name: "全部消息",
+        following: true,
+        field: "",
+      },
+    ];
+    activeAnalysisTab.value = analysisTabSequence;
+    expandedRepeats.value = new Set();
+    temporaryView.value = undefined;
+    lastOperationRange.value = undefined;
+  },
+);
+function openResearch(mode = "review") {
+  researchMode.value = mode;
+  researchOpen.value = true;
+}
+function watchField(field: FieldColumn) {
+  try {
+    fieldWatch.add(field, selected.value);
+    researchOpen.value = false;
+  } catch (error) {
+    failure(error);
+  }
+}
+async function locateWatchedField(key: string) {
+  const item = fieldWatch.items.value.find((item) => item.key === key);
+  if (!item || !capture.value) return;
+  await locateResearch({
+    captureId: capture.value.id,
+    index: item.index,
+    path: item.path,
+  });
+  item.changed = false;
+}
+async function checkBackend() {
+  try {
+    health.value = await api("/api/health");
+  } catch (error) {
+    failure(error);
+  }
+}
+async function addFieldColumn(field: FieldColumn) {
+  try {
+    research.addColumn(field.path, field.label);
+    await loadMessages(viewingTail.value);
+  } catch (error) {
+    failure(error);
+  }
+}
+async function removeFieldColumn(path: string) {
+  try {
+    research.removeColumn(path);
+    await loadMessages(viewingTail.value);
+  } catch (error) {
+    failure(error);
+  }
+}
+function removeNote(note: MessageNote) {
+  try {
+    research.removeNote(note.index, note.path);
+  } catch (error) {
+    failure(error);
+  }
+}
+function editNote(path = "") {
+  if (!selected.value) return;
+  noteDraft.value = {
+    ...(research.notes.value.find(
+      (item) => item.index === selected.value!.index && item.path === path,
+    ) || { index: selected.value.index, path, text: "", kind: "备注" }),
+  };
+  noteDialog.value = true;
+}
+function saveNote() {
+  try {
+    research.saveNote(noteDraft.value);
+    noteDialog.value = false;
+  } catch (error) {
+    failure(error);
+  }
+}
+const fieldAnnotations = computed(() =>
+  Object.fromEntries(
+    research.notes.value
+      .filter((item) => item.index === selected.value?.index)
+      .map((item) => [item.path, `${item.kind}：${item.text}`]),
+  ),
+);
+const groupingRows = computed(() =>
+  groupedMessageRows(rows.value, messageGrouping.value),
+);
+const groupedRepeats = computed(() => repeatGroups(groupingRows.value));
+const visibleRows = computed(() =>
+  foldRows(groupingRows.value, foldRepeats.value, expandedRepeats.value),
+);
+function toggleRepeat(index: number) {
+  const next = new Set(expandedRepeats.value);
+  if (next.has(index)) next.delete(index);
+  else next.add(index);
+  expandedRepeats.value = next;
+}
+async function toggleFold() {
+  expandedRepeats.value = new Set();
+  await loadMessages(viewingTail.value);
+}
+async function locateResearch(value: {
+  captureId: string;
+  index: number;
+  path?: string;
+}) {
+  researchOpen.value = false;
+  try {
+    if (value.captureId !== capture.value?.id) {
+      const record = captures.value.find((item) => item.id === value.captureId);
+      if (!record) return;
+      await openCapture(record);
+    }
+    const id = capture.value?.id;
+    if (!id || id !== value.captureId) return;
+    const packet = await api<Packet>(
+      `/api/captures/${id}/messages/${value.index}`,
+    );
+    if (capture.value?.id !== id) return;
+    await jumpToContext(packet, "all");
+    if (capture.value?.id === id && value.path) await focusField(value.path);
+  } catch (error) {
+    ElMessage.warning(
+      `无法定位原消息，批注仍保留：${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+async function showResearchRange(value: {
+  from: number;
+  to: number;
+  index?: number;
+  name: string;
+}) {
+  const origin =
+    temporaryView.value?.origin || displayedQuery.value || currentQuery();
+  await quickQuery({ range: `recent:${value.from}:${value.to}` });
+  if (queryError.value) return;
+  temporaryView.value = {
+    name: value.name,
+    origin,
+    applied: displayedQuery.value!,
+  };
+  researchOpen.value = false;
+  const row = rows.value.find((item) => item.index === value.index);
+  if (row) await revealRow(row);
+}
+async function newAnalysisTab() {
+  if (analysisTabs.value.length >= MAX_ANALYSIS_TABS) {
+    ElMessage.warning("最多打开 5 个临时分析页签");
+    return;
+  }
+  saveReadingPlace();
+  const place = readingPlace();
+  if (!place) return;
+  const id = ++analysisTabSequence;
+  analysisTabs.value.push({
+    id,
+    name: `分析 ${analysisTabs.value.length + 1}`,
+    place,
+    following: autoFollow.value,
+    field: focusedField.value,
+    temporary: temporaryView.value,
+  });
+  activeAnalysisTab.value = id;
+}
+async function switchAnalysisTab(id: number) {
+  if (id === activeAnalysisTab.value || switchingAnalysisTab) return;
+  saveReadingPlace();
+  const target = analysisTabs.value.find((item) => item.id === id),
+    place = target?.place;
+  if (!target) return;
+  switchingAnalysisTab = true;
+  pauseListForInteraction("history");
+  const recordId = capture.value?.id;
+  detailGate.cancel();
+  detailLoading.value = false;
+  try {
+    if (place && place.captureId === capture.value?.id) {
+      browsingHistory.value = !target.following;
+      await loadMessages(target.following, false, {
+        query: place.query,
+        page: place.page,
+        scrollTop: place.scrollTop,
+        onCommit: () => {
+          applyQuery(place.query);
+          activeAnalysisTab.value = id;
+          selected.value = undefined;
+          selectedRowIndex.value = undefined;
+          detailOpen.value = false;
+          temporaryView.value = target.temporary;
+        },
+      });
+      if (
+        queryError.value ||
+        capture.value?.id !== recordId ||
+        activeAnalysisTab.value !== id
+      )
+        return;
+      if (!queryError.value && place.selectedIndex !== undefined) {
+        const row = rows.value.find(
+          (item) => item.index === place.selectedIndex,
+        );
+        if (row) await selectDetail(row);
+        else if (place.selectedIndex >= (capture.value?.firstIndex || 0)) {
+          try {
+            await selectDetail(
+              await api<Packet>(
+                `/api/captures/${place.captureId}/messages/${place.selectedIndex}`,
+              ),
+            );
+          } catch {
+            ElMessage.info("此页签原选中消息已不可用");
+          }
+        } else ElMessage.info("此页签原选中消息已淘汰，已恢复筛选与位置");
+        detailOpen.value = place.detailOpen;
+        tab.value = place.tab;
+        if (target.field && selected.value) await focusField(target.field);
+      }
+      if (target.following && !queryError.value) autoFollow.value = true;
+      await nextTick();
+    }
+  } finally {
+    switchingAnalysisTab = false;
+  }
+}
+async function closeAnalysisTab(id: number) {
+  if (analysisTabs.value.length <= 1) return;
+  if (id === activeAnalysisTab.value) {
+    const other = analysisTabs.value.find((item) => item.id !== id)!;
+    await switchAnalysisTab(other.id);
+    if (activeAnalysisTab.value === id) return;
+  }
+  analysisTabs.value = analysisTabs.value.filter((item) => item.id !== id);
+}
+async function renameAnalysisTab(id: number) {
+  const item = analysisTabs.value.find((item) => item.id === id);
+  if (!item) return;
+  try {
+    const result = await ElMessageBox.prompt(
+      "页签名称（本次记录内临时保留）",
+      "重命名分析页签",
+      {
+        inputValue: item.name,
+        inputValidator: (value) =>
+          (!!value?.trim() && value.length <= 20) || "请输入 1～20 字名称",
+      },
+    );
+    item.name = result.value.trim();
+  } catch {}
 }
 /** 保留输入草稿；只在查询成功后发布快捷操作及撤销位置。 */
 async function quickQuery(patch: Partial<WorkspaceQuery>) {
@@ -706,7 +1047,7 @@ async function saveCurrentSnapshot() {
   try {
     const result = await ElMessageBox.prompt(
       "保存当前仍保留的全部消息，源连接继续采集；已淘汰消息不能补回。",
-      "保存当前快照",
+      "保存此刻",
       {
         inputValue: source.name.slice(0, 70) + " · 快照",
         inputValidator: (value) =>
@@ -739,7 +1080,7 @@ async function enableContinuous() {
     if (capture.value?.id === source.id) capture.value = result;
     await reloadCaptures();
     ElMessage.success(
-      "已启用持续落盘；内存继续按预算淘汰，磁盘记录可在停止或重启后读取",
+      "已开始持续保存；内存继续按预算淘汰，磁盘记录可在停止或重启后读取",
     );
   } catch (error) {
     failure(error);
@@ -846,11 +1187,53 @@ watch(pauseOnSelect, (value) =>
 );
 const pauseReason = ref("manual");
 const activity = useCaptureActivity(() => capture.value);
+const fieldWatch = useFieldWatch(
+  () => capture.value,
+  () => activity.latest.value?.lastIndex,
+  () => supportsAnalysis.value,
+);
 const protocolWatch = useProtocolWatch(
   () => capture.value,
   () => activity.latest.value,
 );
 const isFollowing = computed(() => autoFollow.value && !browsingHistory.value);
+const retentionSnapshot = shallowRef<Capture>();
+const retentionError = ref("");
+async function refreshRetention() {
+  const id = capture.value?.id;
+  if (!id) return;
+  retentionError.value = "";
+  try {
+    const result = await api<Capture>(`/api/captures/${id}/overview`);
+    if (capture.value?.id === id) retentionSnapshot.value = result;
+  } catch {
+    if (capture.value?.id === id)
+      retentionError.value = "保存范围刷新失败，以下保留上次确认结果";
+  }
+}
+const retentionCapture = computed(() => {
+  const record = capture.value;
+  if (!record) return;
+  const summary =
+    captures.value.find((item) => item.id === record.id) || record;
+  const latest = activity.latest.value;
+  const confirmed =
+    retentionSnapshot.value?.id === record.id
+      ? retentionSnapshot.value
+      : record;
+  return {
+    ...record,
+    ...confirmed,
+    messageCount: summary.messageCount,
+    evictedCount: summary.evictedCount,
+    firstIndex:
+      latest?.captureId === record.id
+        ? latest.firstRetained
+        : summary.firstIndex,
+    lastIndex:
+      latest?.captureId === record.id ? latest.lastIndex : summary.lastIndex,
+  };
+});
 const rawActivity = computed(() =>
   isFollowing.value ? activity.recent.value : activity.unread.value,
 );
@@ -912,9 +1295,22 @@ async function viewActivity(kind: "all" | "first" | "attention") {
   if (!delta || !delta.total || (kind === "first" && !delta.firstSeen.length))
     return;
   const id = capture.value?.id;
+  const origin =
+    temporaryView.value?.origin || displayedQuery.value || currentQuery();
   await quickQuery(activityQuery(delta, kind));
-  if (!queryError.value && capture.value?.id === id)
+  if (!queryError.value && capture.value?.id === id) {
+    temporaryView.value = {
+      name:
+        kind === "all"
+          ? "查看新增消息"
+          : kind === "first"
+            ? "查看首次出现协议"
+            : "查看需关注消息",
+      origin,
+      applied: displayedQuery.value!,
+    };
     activity.acknowledge(snapshot);
+  }
 }
 async function removeBlockingFilter(reason: EmptyReason) {
   await quickQuery(relaxFilter(displayedQuery.value || currentQuery(), reason));
@@ -1139,6 +1535,7 @@ function excludeSelectedProtocols() {
 }
 // 只有查询成功发布后才清理已排除的选择；失败时仍可查看选择并重试。
 watch(displayedQuery, (query) => {
+  if (!query?.range.startsWith("recent:")) temporaryView.value = undefined;
   if (!query || !selectedProtocols.value.length) return;
   const excluded = new Set(query.exclude.split(/[,，\s]+/).filter(Boolean));
   selectedProtocols.value = selectedProtocols.value.filter(
@@ -1154,6 +1551,10 @@ watch(
 );
 // 点选详情和实时未读计数不改变列表内容；避免因此重跑整页单元格和操作菜单。
 const tableRenderDeps = computed(() => [
+  foldRepeats.value,
+  messageGrouping.value,
+  expandedRepeats.value,
+  research.columns.value,
   tableRevision.value,
   protocolWatch.choices.value,
   highlightedRow.value,
@@ -1172,10 +1573,21 @@ const tableRenderDeps = computed(() => [
   displayedQuery.value?.q,
   ...Object.values(columns.value),
 ]);
-watch([selectedRowIndex, rows], async () => {
+watch([selectedRowIndex, groupingRows], async () => {
+  const chosen = groupingRows.value.find(
+    (item) => item.index === selectedRowIndex.value,
+  );
+  if (
+    chosen?.repeatOf !== undefined &&
+    !expandedRepeats.value.has(chosen.repeatOf)
+  ) {
+    const next = new Set(expandedRepeats.value);
+    next.add(chosen.repeatOf);
+    expandedRepeats.value = next;
+  }
   await nextTick();
   packetTable.value?.setCurrentRow(
-    rows.value.find((item) => item.index === selectedRowIndex.value),
+    groupingRows.value.find((item) => item.index === selectedRowIndex.value),
   );
 });
 const contextScope = ref<"connection" | "all">("connection");
@@ -1274,7 +1686,7 @@ const activeFilters = computed(() => {
       key: "connection",
       label: `连接：${q.connection.slice(0, 8)}`,
     });
-  if (q.range)
+  if (q.range && !q.range.startsWith("recent:"))
     result.push({
       key: "range",
       label: `区间：${readingRange(q.range, capture.value?.marks || [])?.name || q.range}`,
@@ -1318,6 +1730,7 @@ const activityWindow = useActivityWindow(
   () => rawActivity.value,
   () => displayedQuery.value || currentQuery(),
   () => activity.latest.value,
+  () => !!health.value.activityWindow,
 );
 function cancelQuery(message = "已取消本次查询，保留上次成功结果") {
   messageGate.cancel();
@@ -1426,6 +1839,16 @@ function tableScrollTop() {
   );
 }
 async function revealRow(target: Packet) {
+  const grouped =
+    groupingRows.value.find((item) => item.index === target.index) || target;
+  if (
+    grouped.repeatOf !== undefined &&
+    !expandedRepeats.value.has(grouped.repeatOf)
+  ) {
+    const next = new Set(expandedRepeats.value);
+    next.add(grouped.repeatOf);
+    expandedRepeats.value = next;
+  }
   const id = capture.value?.id;
   locatedRow.value = target.index;
   highlightRow(target.index);
@@ -1435,7 +1858,9 @@ async function revealRow(target: Packet) {
     return;
   const table = packetTable.value;
   table?.setCurrentRow(target);
-  const position = rows.value.findIndex((item) => item.index === target.index);
+  const position = visibleRows.value.findIndex(
+    (item) => item.index === target.index,
+  );
   const root = table?.$el as HTMLElement | undefined;
   const row = root?.querySelectorAll<HTMLElement>(
     ".el-table__body-wrapper .el-table__row",
@@ -1681,6 +2106,14 @@ async function loadMessages(
     offset: String((requestedPage - 1) * DEFAULT_PAGE_SIZE),
     limit: String(DEFAULT_PAGE_SIZE),
     tail: String(tail),
+    ...(supportsAnalysis.value
+      ? {
+          fields: JSON.stringify(
+            research.columns.value.map((field) => field.path),
+          ),
+          fold: String(messageGrouping.value === "content"),
+        }
+      : {}),
   });
   if (query.range) {
     const mark = readingRange(query.range, capture.value.marks);
@@ -2068,10 +2501,17 @@ function jumpLatest() {
   else void loadLatestMessages();
 }
 function loadLatestMessages() {
-  const query = latestQuery(displayedQuery.value || currentQuery());
+  const query = exitTemporaryQuery(
+    displayedQuery.value || currentQuery(),
+    temporaryView.value?.origin,
+    temporaryView.value?.applied,
+  );
   return loadMessages(true, false, {
     query,
-    onCommit: () => applyQuery(query),
+    onCommit: () => {
+      applyQuery(query);
+      temporaryView.value = undefined;
+    },
   });
 }
 function captureName(item: Capture) {
@@ -2132,6 +2572,7 @@ async function select(row: Packet | undefined) {
   await selectDetail(row);
 }
 watch(autoFollow, (value) => {
+  if (switchingAnalysisTab) return;
   if (value) {
     rowActions.value?.close();
     batchExcluding.value = false;
@@ -2458,37 +2899,74 @@ onMounted(async () => {
           >
         </div>
         <div class="capture-list">
-          <div
-            role="button"
-            tabindex="0"
-            @keydown.enter.self="openCapture(item)"
-            v-for="item in captures"
-            :key="item.id || item.name"
-            class="capture-item"
-            :class="{ active: capture?.id === item.id }"
-            :title="item.name"
-            @click="openCapture(item)"
-          >
-            <el-button
-              class="delete-capture"
-              text
-              size="small"
-              type="danger"
-              :disabled="item.liveState === 'CAPTURING'"
-              @click.stop="deleteCapture(item)"
-              title="删除记录"
-              >删除</el-button
+          <template v-for="group in groupedRecords" :key="group.key">
+            <details v-if="group.items.length > 1" open class="record-group">
+              <summary :title="group.label">
+                {{ group.label }} · {{ group.items.length }} 次连接 / 记录
+              </summary>
+              <div class="muted">按已确认角色归组，消息与连接仍独立。</div>
+              <div
+                v-for="item in group.items"
+                :key="item.id"
+                role="button"
+                tabindex="0"
+                class="capture-item"
+                :class="{ active: capture?.id === item.id }"
+                @click="openCapture(item)"
+                @keydown.enter.self="openCapture(item)"
+              >
+                <el-button
+                  class="delete-capture"
+                  text
+                  size="small"
+                  type="danger"
+                  :disabled="item.liveState === 'CAPTURING'"
+                  @click.stop="deleteCapture(item)"
+                  >删除</el-button
+                ><strong>{{ captureName(item) }}</strong
+                ><small
+                  >{{ item.messageCount.toLocaleString() }} 条 ·
+                  {{ item.temporary ? "临时" : "已保存" }} ·
+                  {{ item.liveState === "CAPTURING" ? "采集中" : "已结束" }}
+                  <span v-if="unread[item.id]" class="new-count"
+                    >+{{ unread[item.id] }}</span
+                  ></small
+                >
+              </div>
+            </details>
+            <div
+              v-else
+              role="button"
+              tabindex="0"
+              @keydown.enter.self="openCapture(item)"
+              v-for="item in group.items"
+              :key="item.id || item.name"
+              class="capture-item"
+              :class="{ active: capture?.id === item.id }"
+              :title="item.name"
+              @click="openCapture(item)"
             >
-            <strong>{{ captureName(item) }}</strong
-            ><small v-if="item.id"
-              >{{ item.messageCount.toLocaleString() }} 条消息 ·
-              {{ item.temporary ? "临时" : "已保存" }} ·
-              {{ item.liveState === "CAPTURING" ? "采集中" : "已结束" }}
-              <span v-if="unread[item.id]" class="new-count"
-                >+{{ unread[item.id] }}</span
-              ></small
-            ><small v-else>{{ item.error }}</small>
-          </div>
+              <el-button
+                class="delete-capture"
+                text
+                size="small"
+                type="danger"
+                :disabled="item.liveState === 'CAPTURING'"
+                @click.stop="deleteCapture(item)"
+                title="删除记录"
+                >删除</el-button
+              >
+              <strong>{{ captureName(item) }}</strong
+              ><small v-if="item.id"
+                >{{ item.messageCount.toLocaleString() }} 条消息 ·
+                {{ item.temporary ? "临时" : "已保存" }} ·
+                {{ item.liveState === "CAPTURING" ? "采集中" : "已结束" }}
+                <span v-if="unread[item.id]" class="new-count"
+                  >+{{ unread[item.id] }}</span
+                ></small
+              ><small v-else>{{ item.error }}</small>
+            </div>
+          </template>
           <div v-if="!captures.length" class="muted empty-small">
             尚无抓包记录<br />导入 SAZ 后保存在本机
           </div>
@@ -2593,26 +3071,22 @@ onMounted(async () => {
           </div>
           <div class="capture-actions">
             <el-button
-              size="small"
-              :disabled="!capture"
-              @click="connectionIdentityDialog = true"
-              >账号 / 备注</el-button
-            >
-            <el-button
               v-if="capture?.liveState === 'CAPTURING' && !capture.continuous"
               size="small"
               :loading="continuousBusy"
               :disabled="!!capture.continuousError"
               @click="enableContinuous"
-              >启用持续落盘</el-button
+              title="从当前保留范围开始保存，并持续追加后续消息；不追补此前已淘汰内容"
+              >持续保存</el-button
             >
-            <span v-if="capture?.continuous" class="muted">持续落盘中</span>
+            <span v-if="capture?.continuous" class="muted">正在持续保存</span>
             <el-button
               v-if="capture"
               size="small"
               :loading="snapshotBusy"
               @click="saveCurrentSnapshot"
-              >保存当前快照</el-button
+              title="保存此刻仍保留的消息和字典，不自动保存后续消息"
+              >保存此刻</el-button
             >
             <el-button
               v-if="savedSnapshot"
@@ -2683,6 +3157,8 @@ onMounted(async () => {
               ><el-button size="small" :disabled="!capture">记录操作</el-button
               ><template #dropdown
                 ><el-dropdown-menu
+                  ><el-dropdown-item @click="connectionIdentityDialog = true"
+                    >账号 / 备注</el-dropdown-item
                   ><el-dropdown-item @click="openMark"
                     >标记操作区间</el-dropdown-item
                   ><el-dropdown-item @click="exportCapture"
@@ -2701,6 +3177,98 @@ onMounted(async () => {
               >专注列表</el-button
             >
           </div>
+        </div>
+        <div
+          v-if="health.ready && !supportsAnalysis"
+          class="warning-bar compatibility-bar"
+          role="status"
+        >
+          页面需要新版后端才能使用分析工具。请先保存临时抓包，再重启工作台并刷新页面。<el-button
+            text
+            @click="checkBackend"
+            >重新检查</el-button
+          >
+        </div>
+        <div v-if="capture" class="analysis-tabbar" aria-label="临时分析页签">
+          <span
+            v-for="item in analysisTabs"
+            :key="item.id"
+            class="analysis-tab"
+            :class="{ active: item.id === activeAnalysisTab }"
+            ><button
+              @click="switchAnalysisTab(item.id)"
+              @dblclick="renameAnalysisTab(item.id)"
+              :aria-pressed="item.id === activeAnalysisTab"
+              title="双击重命名"
+            >
+              {{ item.name }}</button
+            ><button
+              v-if="analysisTabs.length > 1"
+              @click="closeAnalysisTab(item.id)"
+              :aria-label="`关闭 ${item.name}`"
+            >
+              ×
+            </button></span
+          ><el-button
+            text
+            size="small"
+            @click="newAnalysisTab"
+            :disabled="analysisTabs.length >= MAX_ANALYSIS_TABS"
+            >＋ 分析页签</el-button
+          >
+          <el-popover trigger="click" :width="340" @show="refreshRetention"
+            ><template #reference
+              ><button class="storage-summary">
+                {{ retentionCapture?.temporary ? "临时记录" : "已保存" }} · 内存
+                {{ retentionCapture?.messageCount.toLocaleString() }} 条{{
+                  retentionCapture?.continuous ? " · 持续保存中" : ""
+                }}
+              </button></template
+            >
+            <p>
+              内存保留 #{{ retentionCapture?.firstIndex ?? 0 }}–{{
+                retentionCapture?.lastIndex ?? 0
+              }}，上限 {{ retentionCapture?.maxMessages ?? "未提供" }} 条。
+            </p>
+            <p v-if="retentionError" class="warning-bar">
+              {{ retentionError }}
+            </p>
+            <p v-if="retentionCapture?.diskFirstIndex !== undefined">
+              磁盘已保存 #{{ retentionCapture.diskFirstIndex }}–{{
+                retentionCapture.diskLastIndex
+              }}。
+            </p>
+            <p v-else>
+              {{
+                retentionCapture?.temporary
+                  ? "当前记录尚未保存，退出工作台会丢失临时内容。"
+                  : "当前为已保存记录。"
+              }}
+            </p>
+            <p v-if="retentionCapture?.evictedCount">
+              内存已淘汰 {{ retentionCapture.evictedCount }} 条；{{
+                retentionCapture.diskFirstIndex === undefined
+                  ? "更早消息未保存，无法恢复。"
+                  : "请按磁盘已保存范围核对是否可恢复。"
+              }}
+            </p>
+            <p v-if="capture.clearedCount">
+              手动清空 {{ capture.clearedCount }} 条。
+            </p></el-popover
+          >
+        </div>
+        <div
+          v-if="displayedQuery?.range.startsWith('recent:')"
+          class="temporary-view-bar"
+        >
+          <span
+            >{{ temporaryView?.name || "临时查看" }} ·
+            {{
+              readingRange(displayedQuery.range, capture?.marks || [])?.name
+            }}（临时查看，原筛选保留）</span
+          ><el-button text size="small" @click="jumpLatest"
+            >返回实时 / 最新</el-button
+          >
         </div>
         <div class="workspace-tools">
           <div class="search-toolbar" role="search" aria-label="协议与消息搜索">
@@ -2736,6 +3304,29 @@ onMounted(async () => {
             >
           </div>
           <div class="view-toolbar">
+            <el-dropdown
+              trigger="click"
+              :disabled="!capture || !supportsAnalysis"
+              ><el-button :disabled="!capture || !supportsAnalysis"
+                >分析工具</el-button
+              ><template #dropdown
+                ><el-dropdown-menu
+                  ><el-dropdown-item @click="openResearch('time')"
+                    >时间定位</el-dropdown-item
+                  ><el-dropdown-item @click="openResearch('review')"
+                    >操作回顾</el-dropdown-item
+                  ><el-dropdown-item @click="openResearch('compare')"
+                    >两次操作对照</el-dropdown-item
+                  ><el-dropdown-item @click="openResearch('anomalies')"
+                    >异常协议</el-dropdown-item
+                  ><el-dropdown-item @click="openResearch('notes')"
+                    >消息 / 字段批注</el-dropdown-item
+                  ><el-dropdown-item @click="openResearch('columns')"
+                    >字段列与关注</el-dropdown-item
+                  ></el-dropdown-menu
+                ></template
+              ></el-dropdown
+            >
             <el-popover
               v-model:visible="advancedFilters"
               trigger="click"
@@ -2986,6 +3577,7 @@ onMounted(async () => {
           :watched="protocolWatch.choices.value"
           :activity-error="activityWindow.error.value || activity.error.value"
           :loading="activityWindow.loading.value"
+          :restart-required="activityWindow.restartRequired.value"
           @latest="jumpLatest"
           @activity="viewActivity"
           @watch="viewWatched"
@@ -2997,6 +3589,41 @@ onMounted(async () => {
             }
           "
         />
+        <div
+          v-if="fieldWatch.items.value.length"
+          class="field-watchbar"
+          aria-label="关注字段变化"
+        >
+          <span>字段关注</span
+          ><span
+            v-for="item in fieldWatch.items.value"
+            :key="item.key"
+            class="field-watch-item"
+            ><button
+              :class="{ changed: item.changed }"
+              :title="`${item.protocolName} · ${item.direction} · ${item.path} · 连接 ${item.connection}`"
+              @click="locateWatchedField(item.key)"
+            >
+              {{ item.label }}：{{
+                item.changed
+                  ? `${item.first} → ${item.last}`
+                  : (item.last ?? "等待采样")
+              }}{{ item.incomplete ? "（保留范围不完整）" : ""
+              }}{{ item.error ? "（监视失败）" : "" }}</button
+            ><button
+              @click="fieldWatch.remove(item.key)"
+              :aria-label="`取消关注字段 ${item.label}`"
+            >
+              ×
+            </button></span
+          ><el-button
+            v-if="fieldWatch.items.value.some((item) => item.error)"
+            text
+            size="small"
+            @click="fieldWatch.refresh"
+            >重试字段关注</el-button
+          >
+        </div>
         <div
           v-if="actionFeedback && undoPlace"
           class="local-action-feedback"
@@ -3069,7 +3696,7 @@ onMounted(async () => {
                   ref="packetTable"
                   class="packet-table"
                   v-loading="busy"
-                  :data="rows"
+                  :data="visibleRows"
                   :fit="true"
                   :row-class-name="
                     ({ row }: { row: Packet }) =>
@@ -3218,8 +3845,35 @@ onMounted(async () => {
                           <HighlightedText
                             :text="row.protocolName || '未识别消息'"
                             :query="detailQuery"
-                          /></button></span></template
-                  ></el-table-column>
+                          /></button
+                        ><button
+                          v-if="
+                            foldRepeats &&
+                            (groupedRepeats.get(row.index)?.length || 0) > 1
+                          "
+                          class="repeat-toggle"
+                          :title="`${groupedRepeats.get(row.index)?.[0]?.time} 至 ${groupedRepeats.get(row.index)?.at(-1)?.time}；仅本页；${messageGrouping === 'protocol' ? '同协议组，内容可不同，可能穿插其他协议，代表行只展示一条样本' : '业务内容相同的连续消息'}；展开核对原消息`"
+                          @click.stop="toggleRepeat(row.index)"
+                        >
+                          {{ expandedRepeats.has(row.index) ? "收起" : "展开" }}
+                          {{ messageGrouping === "protocol" ? "组" : "×"
+                          }}{{ groupedRepeats.get(row.index)?.length }}
+                        </button></span
+                      ></template
+                    ></el-table-column
+                  >
+                  <el-table-column
+                    v-for="field in research.columns.value"
+                    :key="field.path"
+                    :label="field.label"
+                    width="150"
+                    show-overflow-tooltip
+                    ><template #default="{ row }"
+                      ><span :title="field.path">{{
+                        row.fieldValues?.[field.path] ?? "—"
+                      }}</span></template
+                    ></el-table-column
+                  >
                   <el-table-column
                     prop="preview"
                     label="消息内容摘要"
@@ -3305,6 +3959,29 @@ onMounted(async () => {
                   @exclude="excludeProtocol"
                 />
                 <div class="pagination">
+                  <div class="message-grouping">
+                    <span>本页显示：</span
+                    ><el-select
+                      v-model="messageGrouping"
+                      :disabled="!supportsAnalysis"
+                      size="small"
+                      aria-label="本页消息显示方式"
+                      @change="toggleFold"
+                    >
+                      <el-option value="none" label="逐条消息" />
+                      <el-option value="content" label="相同内容折叠" />
+                      <el-option
+                        value="protocol"
+                        label="同协议归组（内容可不同）"
+                      />
+                    </el-select>
+                  </div>
+                  <span
+                    v-if="messageGrouping === 'protocol'"
+                    class="grouping-hint"
+                    title="同连接、方向、协议和解码状态归组；可能跨越穿插消息，不能按折叠行推断完整时间顺序"
+                    >内容可不同，展开核对原编号</span
+                  >
                   <span class="muted">{{
                     viewingTail
                       ? `${isFollowing ? "最新" : "暂停窗口"} ${rows.length} 条 / 匹配 ${total} 条`
@@ -3389,6 +4066,13 @@ onMounted(async () => {
                     :loading="comparingPrevious"
                     @click="comparePrevious"
                     >对比上一条同协议</el-button
+                  >
+                  <el-button
+                    v-if="selected"
+                    text
+                    size="small"
+                    @click="editNote('')"
+                    >消息批注</el-button
                   >
                   <span
                     v-if="selected"
@@ -3572,6 +4256,13 @@ onMounted(async () => {
                     </summary>
                     <div>{{ selected.warnings.join("；") }}</div>
                   </details>
+                  <p
+                    v-if="fieldAnnotations['']"
+                    class="message-note"
+                    :title="fieldAnnotations['']"
+                  >
+                    消息批注：{{ fieldAnnotations[""] }}
+                  </p>
                   <el-tabs v-model="tab" class="detail-tabs">
                     <el-tab-pane label="JSON 树" name="tree"
                       ><div v-if="tab === 'tree'" class="detail-content">
@@ -3582,6 +4273,11 @@ onMounted(async () => {
                           :key="`${capture?.id}:${selected.index}`"
                           :expansion-state="expandedFields"
                           @expansion="rememberExpansion"
+                          :field-actions="supportsAnalysis"
+                          :annotations="fieldAnnotations"
+                          @column="addFieldColumn"
+                          @note="editNote"
+                          @watch-field="watchField"
                           :focused-path="focusedField"
                         />
                         <div v-else class="empty-detail">
@@ -3690,6 +4386,56 @@ onMounted(async () => {
         :after="selected"
       />
     </el-dialog>
+    <ResearchPanel
+      v-if="researchOpen && capture && supportsAnalysis"
+      :capture="capture"
+      :captures="captures"
+      :query="displayedQuery || currentQuery()"
+      :columns="research.columns.value"
+      :notes="research.notes.value"
+      :selected="selected"
+      :mode="researchMode"
+      :initial-range="lastOperationRange"
+      @close="researchOpen = false"
+      @locate="locateResearch"
+      @range="showResearchRange"
+      @remove-column="removeFieldColumn"
+      @remove-note="removeNote"
+      @note="editNote"
+      @watch-field="watchField"
+      @save-range="
+        researchOpen = false;
+        markDialog = true;
+      "
+    />
+    <el-dialog
+      v-model="noteDialog"
+      title="消息 / 字段批注"
+      width="min(520px, 94vw)"
+      ><p>消息 #{{ noteDraft.index }} · {{ noteDraft.path || "整条消息" }}</p>
+      <p class="muted">
+        批注为人工记录，不改变协议解码结果。标为“已验证”须由你自行核对证据。
+      </p>
+      <el-select v-model="noteDraft.kind" aria-label="批注类型"
+        ><el-option
+          v-for="kind in ['备注', '推测', '已验证']"
+          :key="kind"
+          :label="kind"
+          :value="kind" /></el-select
+      ><el-input
+        v-model="noteDraft.text"
+        type="textarea"
+        :rows="4"
+        maxlength="500"
+        show-word-limit
+        placeholder="记录观察、判断依据或待确认的问题"
+      /><template #footer
+        ><el-button @click="noteDialog = false">取消</el-button
+        ><el-button type="primary" @click="saveNote"
+          >保存批注</el-button
+        ></template
+      ></el-dialog
+    >
     <el-dialog
       v-model="markDialog"
       title="标记区间 / 保存 AI 分析快照"
@@ -3728,6 +4474,14 @@ onMounted(async () => {
             " /></el-form-item></el-form
       ><template #footer
         ><el-button @click="markDialog = false">取消</el-button
+        ><el-button
+          v-if="supportsAnalysis"
+          @click="
+            lastOperationRange = { from: operation.from, to: operation.to };
+            markDialog = false;
+            openResearch('review');
+          "
+          >查看操作回顾</el-button
         ><el-button type="primary" :loading="busy" @click="freezeOperation"
           >保存快照并分析</el-button
         ><el-button type="primary" :loading="busy" @click="mark"

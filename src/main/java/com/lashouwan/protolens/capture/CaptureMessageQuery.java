@@ -75,6 +75,15 @@ public final class CaptureMessageQuery {
     }
 
     public ObjectNode messages(ObjectNode capture, MessageQuery request, ObjectNode summary) {
+        return messages(capture, request, summary, List.of(), false);
+    }
+
+    public ObjectNode messages(
+            ObjectNode capture,
+            MessageQuery request,
+            ObjectNode summary,
+            List<String> projectedFields,
+            boolean fold) {
         String query = request.query();
         int from = request.from();
         int to = request.to();
@@ -109,6 +118,8 @@ public final class CaptureMessageQuery {
                         ? (order == MessageOrder.DESC ? 0 : Math.max(0, matching.size() - limit))
                         : Math.min(offset, matching.size());
         ArrayNode items = mapper.createArrayNode();
+        JsonNode previous = null;
+        int repeatStart = -1;
         for (int index = start; index < Math.min(start + limit, matching.size()); index++) {
             JsonNode node = matching.get(index);
             ObjectNode item = mapper.createObjectNode();
@@ -139,6 +150,13 @@ public final class CaptureMessageQuery {
             String matchedPreview =
                     keyword.isBlank() ? "" : searchPreview(node.path("body"), keyword);
             item.put("preview", matchedPreview.isBlank() ? preview.toString() : matchedPreview);
+            CaptureAnalysisQuery.project(node, item, projectedFields);
+            if (fold && CaptureAnalysisQuery.identical(previous, node)) {
+                item.put("repeatOf", repeatStart);
+            } else {
+                repeatStart = node.path("index").asInt();
+            }
+            previous = node;
             items.add(item);
         }
         ObjectNode result =

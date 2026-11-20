@@ -67,7 +67,9 @@ export function reconcileRows(
       existing.time === item.time &&
       existing.status === item.status &&
       existing.protocolId === item.protocolId &&
-      existing.preview === item.preview
+      existing.preview === item.preview &&
+      existing.repeatOf === item.repeatOf &&
+      JSON.stringify(existing.fieldValues) === JSON.stringify(item.fieldValues)
       ? existing
       : item;
   });

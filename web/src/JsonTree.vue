@@ -13,10 +13,16 @@ const props = defineProps<{
   matchPaths?: string[];
   focusedPath?: string;
   expansionState?: Record<string, boolean>;
+  annotations?: Record<string, string>;
+  fieldActions?: boolean;
 }>();
 const emit = defineEmits<{
   expansion: [value: { path: string; open: boolean }];
+  column: [value: { path: string; label: string }];
+  note: [path: string];
+  watchField: [value: { path: string; label: string }];
 }>();
+const fieldMenu = ref(false);
 function toggle(event: Event) {
   expanded.value = (event.target as HTMLDetailsElement).open;
   emit("expansion", { path: path.value, open: expanded.value });
@@ -100,7 +106,12 @@ const visibleKeys = computed(() =>
       :match-paths="matchPaths"
       :focused-path="focusedPath"
       :expansion-state="expansionState"
+      :annotations="annotations"
+      :field-actions="fieldActions"
       @expansion="emit('expansion', $event)"
+      @column="emit('column', $event)"
+      @note="emit('note', $event)"
+      @watch-field="emit('watchField', $event)"
     />
     <button
       v-if="expanded && count > limit"
@@ -118,9 +129,54 @@ const visibleKeys = computed(() =>
       'json-focused': focusedPath === path && matched,
     }"
     :data-json-path="path"
+    @contextmenu.prevent="fieldMenu = !!fieldActions"
   >
     <span class="json-key">{{ label }}</span
     >:
     <JsonScalar :value="value" />
+    <span
+      v-if="annotations?.[path]"
+      class="field-note"
+      :title="annotations[path]"
+      >✎ {{ annotations[path] }}</span
+    >
+    <el-popover
+      v-if="fieldActions"
+      v-model:visible="fieldMenu"
+      trigger="click"
+      placement="bottom"
+      :width="190"
+    >
+      <template #reference
+        ><button class="json-value-action" title="字段操作" @click.stop>
+          ⋯
+        </button></template
+      >
+      <p class="muted research-path">{{ path }}</p>
+      <el-button
+        text
+        @click="
+          emit('column', { path, label: label || path });
+          fieldMenu = false;
+        "
+        >添加到列表列</el-button
+      >
+      <el-button
+        text
+        @click="
+          emit('note', path);
+          fieldMenu = false;
+        "
+        >添加 / 编辑批注</el-button
+      >
+      <el-button
+        text
+        @click="
+          emit('watchField', { path, label: label || path });
+          fieldMenu = false;
+        "
+        >关注字段变化</el-button
+      >
+    </el-popover>
   </div>
 </template>

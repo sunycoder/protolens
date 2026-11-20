@@ -340,12 +340,19 @@ onBeforeUnmount(() => {
         @update:model-value="emit('update:follow', !!$event)"
         >跟随新消息</el-checkbox
       >
-      <el-checkbox
-        :model-value="pauseOnSelect"
-        size="small"
-        @update:model-value="emit('update:pauseOnSelect', !!$event)"
-        >选中消息后暂停跟随</el-checkbox
-      >
+      <div class="message-click-policy">
+        <span>点击消息时：</span>
+        <el-select
+          :model-value="pauseOnSelect ? 'pause' : 'continue'"
+          size="small"
+          aria-label="点击消息时"
+          title="这是点击时的行为偏好，不表示当前已暂停；后台采集始终继续"
+          @update:model-value="emit('update:pauseOnSelect', $event === 'pause')"
+        >
+          <el-option value="pause" label="暂停列表" />
+          <el-option value="continue" label="继续刷新，固定详情" />
+        </el-select>
+      </div>
       <el-button
         size="small"
         :disabled="!canClearSession"
@@ -483,7 +490,7 @@ onBeforeUnmount(() => {
 .live-controls + .live-controls {
   margin-top: 6px;
 }
-.live-controls .el-select {
+.live-controls > .el-select {
   width: min(640px, 100%);
 }
 .script-link {

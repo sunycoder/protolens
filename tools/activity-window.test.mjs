@@ -41,3 +41,30 @@ test('通知统计切换筛选立即撤下旧入口，拒绝迟到结果，确�
   assert.equal(state.value.value,undefined)
  } finally {scope.stop();globalThis.fetch=originalFetch}
 })
+
+test('旧后端纯文本 404 明确要求重启，普通失败不冒充零新增，重试成功后恢复统计',async()=>{
+ const originalFetch=globalThis.fetch, scope=effectScope()
+ const capture={id:'a',marks:[],firstIndex:0,clearVersion:0}
+ const delta={from:1,to:2,total:2,protocolCount:1,firstSeen:[],attention:0,complete:true}
+ const snapshot={captureId:'a',lastIndex:2,clearVersion:0}
+ let response=()=>new Response('接口不存在',{status:404})
+ globalThis.fetch=async()=>response()
+ try {
+  const state=scope.run(()=>useActivityWindow(()=>capture,()=>delta,()=>defaultQuery,()=>snapshot))
+  await wait()
+  assert.equal(state.restartRequired.value,true)
+  assert.match(state.error.value,/404/)
+  assert.equal(state.value.value,undefined)
+  assert.equal(state.loading.value,false)
+  response=()=>new Response(JSON.stringify({error:'查询失败'}),{status:503})
+  state.refresh();await wait()
+  assert.equal(state.restartRequired.value,false)
+  assert.match(state.error.value,/查询失败/)
+  assert.equal(state.value.value,undefined)
+  response=()=>new Response(JSON.stringify({captureId:'a',clearVersion:0,total:0,attention:0,complete:true,groups:[]}))
+  state.refresh();await wait()
+  assert.equal(state.error.value,'')
+  assert.equal(state.restartRequired.value,false)
+  assert.equal(state.value.value.total,0)
+ } finally {scope.stop();globalThis.fetch=originalFetch}
+})
