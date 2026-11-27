@@ -25,6 +25,12 @@ def publish(directory,tag,notes):
  gh('release','edit',tag,'--repo',repo,'--draft=false','--latest')
 if sys.argv[1]=='publish':
  version=os.environ['VERSION'];directory=pathlib.Path('dist');verify(directory,version)
+ artifacts=[]
+ for name in expected(version):
+  platform='windows-x64' if name.endswith(('.exe','.zip')) else 'macos-arm64' if '-macos-arm64.' in name else 'macos-x64' if '-macos-x64.' in name else 'linux-x64'
+  system,architecture=platform.split('-');p=directory/name
+  artifacts.append({'name':name,'platform':system,'architecture':architecture,'size':p.stat().st_size,'sha256':digest(p),'url':'https://github.com/'+os.environ['GITHUB_REPOSITORY']+'/releases/download/v'+version+'/'+name})
+ (directory/'release-manifest.json').write_text(json.dumps({'version':version,'sourceSha':os.environ['SOURCE_SHA'],'artifacts':artifacts},indent=2)+'\n')
  publish(directory,'v'+version,'ProtoLens '+version+'\n\n公开安装包与便携包；源码独立私有保存。')
 elif sys.argv[1]=='mirror':
  source=os.environ['SOURCE_REPOSITORY'];repo=os.environ['GITHUB_REPOSITORY']
