@@ -13,7 +13,7 @@ on:
       mode:
         type: choice
         default: verify
-        options: [verify, release, mirror, check-source]
+        options: [verify, verify-windows, release, mirror, check-source]
 permissions:
   contents: read
 concurrency:
@@ -43,27 +43,17 @@ jobs:
           path: source
       - run: test -f source/build.gradle && test -f source/AGENTS.md
   build:
-    if: inputs.mode == 'verify' || inputs.mode == 'release'
+    if: inputs.mode == 'verify' || inputs.mode == 'verify-windows' || inputs.mode == 'release'
     needs: validate
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            platform: windows-x64
-            tasks: packageInstaller packagePortable
-          - os: macos-15
-            platform: macos-arm64
-            tasks: packageInstaller packagePortable
-          - os: macos-15-intel
-            platform: macos-x64
-            tasks: packageInstaller packagePortable
-          - os: ubuntu-latest
-            platform: linux-x64
-            tasks: packagePortable
+      matrix: ${{ fromJSON(inputs.mode == 'verify-windows' && '{"include":[{"os":"windows-latest","platform":"windows-x64","tasks":"packageInstaller packagePortable"}]}' || '{"include":[{"os":"windows-latest","platform":"windows-x64","tasks":"packageInstaller packagePortable"},{"os":"macos-15","platform":"macos-arm64","tasks":"packageInstaller packagePortable"},{"os":"macos-15-intel","platform":"macos-x64","tasks":"packageInstaller packagePortable"},{"os":"ubuntu-latest","platform":"linux-x64","tasks":"packagePortable"}]}') }}
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Preserve repository line endings
+        shell: bash
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
         with:
           path: distribution
