@@ -1,0 +1,177 @@
+name: ProtoLens public distribution
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Trusted full source commit SHA
+        required: true
+        type: string
+      version:
+        description: Product version without v
+        required: true
+        type: string
+      mode:
+        type: choice
+        default: verify
+        options: [verify, release, mirror, check-source]
+permissions:
+  contents: read
+concurrency:
+  group: protolens-${{ inputs.mode }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        env:
+          SHA: ${{ inputs.source_sha }}
+          VERSION: ${{ inputs.version }}
+          SOURCE: ${{ vars.SOURCE_REPOSITORY }}
+        run: python -c "import os,re; assert re.fullmatch('[a-f0-9]{40}',os.environ['SHA']); assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+',os.environ['VERSION']); assert re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',os.environ['SOURCE'])"
+  check-source:
+    if: inputs.mode == 'check-source'
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPOSITORY }}
+          ref: ${{ inputs.source_sha }}
+          token: ${{ secrets.SOURCE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+      - run: test -f source/build.gradle && test -f source/AGENTS.md
+  build:
+    if: inputs.mode == 'verify' || inputs.mode == 'release'
+    needs: validate
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+            tasks: packageInstaller packagePortable
+          - os: macos-15
+            platform: macos-arm64
+            tasks: packageInstaller packagePortable
+          - os: macos-15-intel
+            platform: macos-x64
+            tasks: packageInstaller packagePortable
+          - os: ubuntu-latest
+            platform: linux-x64
+            tasks: packagePortable
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: distribution
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPOSITORY }}
+          ref: ${{ inputs.source_sha }}
+          token: ${{ secrets.SOURCE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.5'
+          cache-disabled: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12'
+      - name: Verify source and format before temporary configuration
+        working-directory: source
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          actual=$(sed -n 's/^version=//p' src/main/resources/analyzer-version.properties | tr -d '\r')
+          test "$actual" = "$VERSION"
+          gradle --no-daemon webInstall checkFormat > ../source-check.log 2>&1 || { echo 'Source check failed; inspect in a private environment'; exit 1; }
+      - name: Tests
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = Linux ]; then
+            gradle --no-daemon --max-workers=2 test > ../source-tests.log 2>&1 || { echo 'Backend tests failed; inspect privately'; exit 1; }
+            node --experimental-strip-types --test tools/*.test.mjs > ../source-node-tests.log 2>&1 || { echo 'Frontend tests failed; inspect privately'; exit 1; }
+            python3 -m unittest tools.test_mitmproxy_collector > ../source-python-tests.log 2>&1 || { echo 'Collector tests failed; inspect privately'; exit 1; }
+          else
+            gradle --no-daemon compileJava compileTestJava > ../source-compile.log 2>&1 || { echo 'Compilation failed; inspect privately'; exit 1; }
+          fi
+      - name: Remove local-only protocol source from package defaults
+        working-directory: source
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json,pathlib
+          p=pathlib.Path('config/analyzer.json');data=json.loads(p.read_text(encoding='utf-8-sig'))
+          data['competitorPath']='';data['protocolFile']='';data['protocolAutoLoad']=False
+          p.write_text(json.dumps(data,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          PY
+      - name: Native package and verification
+        working-directory: source
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          gradle --no-daemon ${{ matrix.tasks }} > ../source-package.log 2>&1 || { echo 'Packaging failed; inspect privately'; exit 1; }
+          if [ "${{ runner.os }}" = macOS ]; then
+            node tools/verify-macos-package.mjs "build/installer/ProtoLens-${VERSION}-${{ matrix.platform }}.dmg" "${{ matrix.platform }}" > ../package-check.log 2>&1 || { echo 'macOS package check failed'; exit 1; }
+          fi
+          mkdir -p ../dist
+          if [ "${{ runner.os }}" = Windows ]; then cp release/ProtoLens-latest.exe ../dist/; fi
+          if [ "${{ runner.os }}" = macOS ]; then cp "build/installer/ProtoLens-${VERSION}-${{ matrix.platform }}.dmg" ../dist/; fi
+          cp build/distributions/ProtoLens-${VERSION}-${{ matrix.platform }}.* ../dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.platform }}
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            dist/ProtoLens-latest.exe
+            dist/ProtoLens-*-windows-x64.zip
+            dist/ProtoLens-*-macos-arm64.dmg
+            dist/ProtoLens-*-macos-arm64.tar.gz
+            dist/ProtoLens-*-macos-x64.dmg
+            dist/ProtoLens-*-macos-x64.tar.gz
+            dist/ProtoLens-*-linux-x64.tar.gz
+  publish:
+    if: inputs.mode == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          merge-multiple: true
+          path: dist
+      - run: python scripts/release.py publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+  mirror:
+    if: inputs.mode == 'mirror'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: python scripts/release.py mirror
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REPOSITORY: ${{ vars.SOURCE_REPOSITORY }}
